@@ -7035,26 +7035,37 @@ class OverseerImpl implements AgentHooks {
 
       let hasBeenNudged = false;
       let outcome: "ok" | "callbacks_stalled" = "ok";
+      // Model steps a turn may take, shared across its compaction reloads (see CompactionContext).
+      // A callback nudge below starts a fresh count, as it did when each runAgent call counted.
+      let stepBudget = {remaining: 30};
       while (true) {
-        let checkpoint = this.getActiveChatCompaction(chatId);
-        let chatMessages = this.#listChatTail(chatId, checkpoint);
         let callbackCountBefore = liveChat.activeAgentCallbacks.size;
-
-        let compactionTurn = isCompactionTurn(chatMessages);
-        let newCheckpoint = await runAgent(
-            this, chosenModel, chatId, aiModel.profile, chatMessages, controller.signal,
-            initiator, callbackInitiated, {
-              checkpoint,
-              modelConfig: aiModel.config,
-              measuredTokens: this.getChatMetaOrThrow(chatId).totalTokens ?? 0,
-            });
-        if (newCheckpoint) this.#commitChatCompaction(chatId, newCheckpoint);
-        // `/compact` is done once it has compacted. An automatic compaction returned before
-        // prompting the model, so rerun the turn now that the history is shorter. Each compaction
-        // moves the boundary strictly forward and can never pass the newest turn start, so this
-        // reruns a bounded number of times.
+        // Rerun until the agent has done its model work. An automatic compaction returns before
+        // prompting the model and a reload returns after a persisted tool step; both rerun against
+        // the now-shorter durable history. The step budget and the callback-progress baseline above
+        // span these reruns. Each compaction moves the boundary strictly forward and can never pass
+        // the newest turn start, and each reload consumed a step, so the loop is bounded.
+        let compactionTurn = false;
+        while (true) {
+          let checkpoint = this.getActiveChatCompaction(chatId);
+          let chatMessages = this.#listChatTail(chatId, checkpoint);
+          compactionTurn = isCompactionTurn(chatMessages);
+          let agentOutcome = await runAgent(
+              this, chosenModel, chatId, aiModel.profile, chatMessages, controller.signal,
+              initiator, callbackInitiated, {
+                checkpoint,
+                modelConfig: aiModel.config,
+                measuredTokens: this.getChatMetaOrThrow(chatId).totalTokens ?? 0,
+                stepBudget,
+              });
+          if (agentOutcome.type === "compacted") {
+            this.#commitChatCompaction(chatId, agentOutcome.checkpoint);
+          }
+          // `/compact` is done once it has compacted; the model is never prompted.
+          if (compactionTurn || agentOutcome.type === "finished") break;
+          controller.signal.throwIfAborted();
+        }
         if (compactionTurn) break;
-        if (newCheckpoint) continue;
 
         // If not callback-initiated, or all callbacks are resolved, we're done.
         if (!callbackInitiated || liveChat.activeAgentCallbacks.size === 0) {
@@ -7101,6 +7112,7 @@ class OverseerImpl implements AgentHooks {
           text: nudgeText,
         }]);
         hasBeenNudged = true;
+        stepBudget = {remaining: 30};
       }
       turnLogger.debug("agent run finished", {
         event: "agent.run.finished", outcome,
