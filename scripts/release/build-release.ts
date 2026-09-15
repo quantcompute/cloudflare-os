@@ -27,7 +27,7 @@ import { mkdtempSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { killProcessTree, killProcessTreeEscalating } from "../kill-process-tree.ts";
 import { mapConcurrent } from "../map-concurrent.ts";
-import { vpRunEnv } from "../vp/concurrency.ts";
+import { vpCacheFlag, vpRunEnv } from "../vp/concurrency.ts";
 import {
   collectAssets, collectModules, stableStringify, type CollectedAssets,
 } from "./hash-lib.ts";
@@ -226,7 +226,7 @@ function pinnedWranglerVersion(): string {
 async function buildFrontend(signal: AbortSignal): Promise<CollectedAssets> {
   const env = { ...vpRunEnv(), VITE_CF_ACCESS_MODE: "true" };
   await run("frontend (access mode)", "pnpm",
-      ["exec", "vp", "run", "-F", "@gadgets/workshop-frontend", "build"], { env, signal });
+      ["exec", "vp", "run", vpCacheFlag(), "-F", "@gadgets/workshop-frontend", "build"], { env, signal });
   return collectAssets(join(FRONTEND_DIR, "dist"));
 }
 

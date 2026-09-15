@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { getDevServerConfig } from "./dev-server-config.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import { relayTermination } from "./relay-termination.ts";
-import { vpRunEnv } from "./vp/concurrency.ts";
+import { vpCacheFlag, vpRunEnv } from "./vp/concurrency.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -44,8 +44,8 @@ function runPnpm(args: string[]): void {
 }
 
 runPnpm(["install"]);
-runPnpm(["exec", "vp", "run", "--cache", "@gadgets/typed-storage#build"]);
-runPnpm(["exec", "vp", "run", "--cache", "@gadgets/workshop-frontend#build:assets"]);
+runPnpm(["exec", "vp", "run", vpCacheFlag(), "@gadgets/typed-storage#build"]);
+runPnpm(["exec", "vp", "run", vpCacheFlag(), "@gadgets/workshop-frontend#build:assets"]);
 
 // ---------------------------------------------------------------------------
 // Launch the local server (serves the built frontend as static assets).
