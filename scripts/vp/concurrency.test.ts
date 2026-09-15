@@ -7,7 +7,7 @@ import {
   BYTES_PER_TASK, ROOT_ENV_FILE, VP_DEFAULT_CONCURRENCY_LIMIT, VP_RUN_CONCURRENCY_LIMIT,
   cgroupMemoryLimitBytes, cgroupMounts, concurrencyEnv, defaultConcurrencyLimit,
   effectiveMemoryBytes, envFileConcurrencyLimit, overridesConcurrency, splitConcurrencyLimit,
-  vpRunEnv,
+  vpCacheFlag, vpCacheUsable, vpRunEnv,
 } from "./concurrency.ts";
 
 const GiB = 1024 ** 3;
@@ -307,6 +307,28 @@ describe("envFileConcurrencyLimit", () => {
     const root = dirname(ROOT_ENV_FILE);
     assert.ok(existsSync(join(root, "pnpm-workspace.yaml")),
         `${root} is not the workspace root`);
+  });
+});
+
+describe("vpCacheUsable", () => {
+  // The kernel release is the whole signal, and both directions matter: too narrow and `pnpm build`
+  // still dies on the machine this exists for; too wide and every other machine gives up its cache.
+  it("refuses the cache on WSL, whose kernel release names Microsoft", () => {
+    assert.equal(vpCacheUsable("6.18.35.2-microsoft-standard-WSL2"), false);
+    assert.equal(vpCacheUsable("5.15.90.1-microsoft-standard-WSL2"), false);
+  });
+
+  it("keeps it on the kernels CI and macOS users run", () => {
+    assert.equal(vpCacheUsable("6.8.0-51-generic"), true); // ubuntu-latest
+    assert.equal(vpCacheUsable("23.6.0"), true); // Darwin
+  });
+
+  // Pinned on both sides rather than derived from `vpCacheUsable` here: omitting the flag is *not*
+  // the same as disabling caching, since tasks cache by default, so `--no-cache` is the part that
+  // has to be spelled out.
+  it("spells the flag for the machine, and never omits it", () => {
+    assert.equal(vpCacheFlag("6.18.35.2-microsoft-standard-WSL2"), "--no-cache");
+    assert.equal(vpCacheFlag("6.8.0-51-generic"), "--cache");
   });
 });
 

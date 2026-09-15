@@ -1,5 +1,7 @@
-// Picks the task concurrency for the `vp run` invocations this repo makes, from the machine it is
-// running on.
+// Picks the task concurrency, and the cache flag, for the `vp run` invocations this repo makes, from
+// the machine it is running on. The cache flag is the shorter half: where the file tracker cannot
+// run at all, the run has to be uncached (`vpCacheUsable`, and the note there). Everything below is
+// the concurrency half.
 //
 // Vite+ runs at most `DEFAULT_CONCURRENCY_LIMIT = 4` tasks at once (vite-task,
 // `crates/vt_plan/src/execution_graph.rs`) unless `--concurrency-limit N` or
@@ -49,7 +51,7 @@
 // what tasks see without changing what they cache against.
 
 import { readFileSync } from "node:fs";
-import { availableParallelism, totalmem } from "node:os";
+import { availableParallelism, release, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
@@ -305,6 +307,46 @@ export function measureMachine(): Machine {
   const hostBytes = totalmem();
   const memoryBytes = effectiveMemoryBytes(hostBytes, cgroupMemoryLimitBytes());
   return { cpus: availableParallelism(), memoryBytes, cgroupLimited: memoryBytes < hostBytes };
+}
+
+/**
+ * Whether this machine can run `vp run` with its task cache enabled at all.
+ *
+ * Not every machine can, and the ones that cannot fail in a way that does not name the cause. With
+ * caching on, `vp run` injects fspy, the Vite+ Task file tracker, into every task process
+ * (`LD_PRELOAD=…`, `FSPY=1`, `FSPY_PAYLOAD=…`). To follow a target `LD_PRELOAD` cannot -- a
+ * statically linked binary, such as the TypeScript 7 `tsgo` shim or esbuild -- it installs a seccomp
+ * user-notification listener before the exec, and the kernel refuses a second listener with EBUSY.
+ * WSL2 already has one on PID 1, so the first task that spawns such a binary dies: node turns a
+ * failed `process.execve` into an abort (exit 134, with a native stack trace) rather than a
+ * throwable, which is why this reads as a segfault instead of a spawn error. Upstream:
+ * voidzero-dev/vite-plus#1643.
+ *
+ * WSL is identified by its kernel release (`6.18.35.2-microsoft-standard-WSL2`); nothing else
+ * `os.release()` reports carries `microsoft`, so no other machine gives up its cache here. The
+ * release is a parameter rather than read inline so both branches are testable from a host that is
+ * not a WSL box -- the same shape as `envFileConcurrencyLimit` above.
+ *
+ * Nothing is lost on the machines that take the slow path: a cached run cannot complete there at
+ * all, so there is no replay to give up. CI (`ubuntu-latest`) is unaffected, which is the property
+ * that matters -- a cache silently disabled everywhere would turn a WSL workaround into a repo-wide
+ * slowdown.
+ */
+export function vpCacheUsable(kernelRelease: string = release()): boolean {
+  return !kernelRelease.includes("microsoft");
+}
+
+/**
+ * The `vp run` cache flag for this machine: `--cache` where tasks can be tracked, `--no-cache` where
+ * they cannot ({@link vpCacheUsable}).
+ *
+ * Passed rather than omitted on the unusable side, because omitting it does *not* disable caching:
+ * tasks cache by default, so `vp run <task>` tracks files exactly as `vp run --cache <task>` does and
+ * fails identically. AGENTS.md documents the same asymmetry from the other direction, where an
+ * uncached run is the one that passes the ambient environment through.
+ */
+export function vpCacheFlag(kernelRelease: string = release()): "--cache" | "--no-cache" {
+  return vpCacheUsable(kernelRelease) ? "--cache" : "--no-cache";
 }
 
 /**
