@@ -91,20 +91,21 @@ a rule for each action kind.
 ## Local development
 
 `pnpm dev-server` — and therefore `pnpm run-local`, which drives it — passes `MCP_PORTAL_*` through
-from the shell and the repo-root `.dev.vars`, and `--mcp-portal-url URL` sets `MCP_PORTAL_URL` for one
-run without editing a file:
+from the shell and the repo-root `.dev.vars`, so a local portal is configured without editing a
+tracked file:
 
 ```
-pnpm run-local --mcp-portal-url http://localhost:9000/mcp
+MCP_PORTAL_URL=http://localhost:9000/mcp
+MCP_ALLOW_INSECURE=true
 ```
 
-That URL is written only into the generated, gitignored `wrangler.dev.jsonc`, and it beats a
-`.dev.vars` entry. When the URL is `http://` the dev server also sets `MCP_ALLOW_INSECURE=true` for
-this connector, since a portal on this machine is unreachable otherwise; set the variable explicitly
-in the shell or `.dev.vars` to keep the production checks. `MCP_PORTAL_AUTH`, `MCP_PORTAL_TOKEN`,
-`MCP_PORTAL_NAME`, `MCP_PORTAL_TRUST_ANNOTATIONS`, and `MCP_PORTAL_HIDDEN_SERVER_IDS` travel the same
-way. None of this changes what a deployment ships: the committed `wrangler.jsonc` still names no
-portal, and a deployment without `MCP_PORTAL_URL` still hides this connector.
+`MCP_ALLOW_INSECURE=true` relaxes the connector's SSRF checks for a plain-`http://` portal on this
+machine; without it such a portal is unreachable and the connector advertises no resources.
+`MCP_PORTAL_AUTH`, `MCP_PORTAL_TOKEN`, `MCP_PORTAL_NAME`, `MCP_PORTAL_TRUST_ANNOTATIONS`, and
+`MCP_PORTAL_HIDDEN_SERVER_IDS` travel the same way. The dev server copies these into the generated,
+gitignored `wrangler.dev.jsonc`. None of this changes what a deployment ships: the committed
+`wrangler.jsonc` still names no portal, and a deployment without `MCP_PORTAL_URL` still hides this
+connector.
 
 ## How the connect flow works
 
