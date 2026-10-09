@@ -5,9 +5,16 @@
 // supplies. The base never touches the Durable Object, the account, or the endpoint's credentials.
 
 import { RpcTarget, type RpcStub } from "cloudflare:workers";
-import type { ActionDescription, ActionKind, ApprovalQueue }
+import type { ActionDescription, ActionKind, ApprovalQueue, HookController }
   from "@gadgets/workshop-shared/gatekeeper";
 
+import {
+  toolUiResourceUri,
+  uiResourceUriInResult,
+  type AppCallSnapshot,
+  type AppResultLike,
+} from "./apps.js";
+import type { AppMessageHookProps, McpAppMessageHookTarget } from "./app-message-hook.js";
 import {
   MAX_TOOL_NAME_CHARS,
   type McpClient,
@@ -26,6 +33,7 @@ import {
 } from "./tools.js";
 import type {
   McpCallResult,
+  McpContent,
   McpToolInfo,
   McpToolListOptions,
   McpToolSummary,
@@ -57,6 +65,15 @@ export type StoredAction = {
   retryable?: boolean;
   /** Populated once applied; delivered to the Gadget as an observation. */
   result?: Extract<McpCallResult, { status: "ok" }>;
+  /**
+   * The `ui://` resource the applied call's own result named, when it named one.
+   *
+   * The stored `result` is the flattened shape this host hands a Gadget, so a result's `_meta` never
+   * reaches it: a server that declares its view on the result rather than on the tool would lose its
+   * sidecar link between the approval and the collection. Read back by the applied arm of
+   * `getActionResult`, which prefers the tool's own declaration when the catalog still has one.
+   */
+  appUri?: string;
   /** Terminal failure reason retained for later collection. */
   error?: string;
 };
@@ -83,6 +100,38 @@ export interface McpSessionHost {
     options?: WithClientOptions,
   ): Promise<T>;
 
+  /**
+   * Mints the sidecar link for one `ui://` resource on this binding, or undefined if it cannot.
+   *
+   * On the host rather than in the session because the facet is what knows the binding a link has
+   * to be scoped to: its endpoint, server name, scope, and trust live there, and the session
+   * reaching this interface is already in a Gadget's hands.
+   *
+   * What the link's view may send back is not decided here: a caller asks for that separately, with
+   * `subscribeAppMessages()` (see `appMessageHook` and `appMessageHookProps`).
+   */
+  appLink(uri: string, call: AppCallSnapshot): Promise<string | undefined>;
+
+  /**
+   * The controller fetcher for one app link, minted by the connector's own `ctx.exports`.
+   *
+   * `props` are the link's own facts -- the resource its view renders, and this server's name --
+   * merged with the two identifiers `subscribeAppMessages()` read off the link's URL, so the
+   * controller describes itself and its deliveries without asking storage anything.
+   */
+  appMessageHook(props: AppMessageHookProps): Fetcher<HookController<McpAppMessageHookTarget>>;
+
+  /**
+   * The props of one live app link, or undefined when this binding's account minted no such link
+   * (or no longer holds one).
+   *
+   * Asked before a subscription is bound: the account owns the token record, a session cannot read
+   * storage, and a subscription to a link that cannot deliver is a promise this host cannot keep.
+   * The pair is read for its own sake as well -- the token is what a registration is filed under,
+   * and the account is what checks it belongs to the link's own deployment.
+   */
+  appMessageHookProps(accountId: string, token: string): Promise<AppMessageHookProps | undefined>;
+
   /** The approval-kind tag for one tool, namespaced so pre-approvals cannot cross servers. */
   actionKindFor(toolName: string): ActionKind;
 
@@ -98,6 +147,30 @@ function requireToolName(method: string, name: unknown): asserts name is string 
   if (name.length > MAX_TOOL_NAME_CHARS) {
     throw new Error(`${method}() tool name must be at most ${MAX_TOOL_NAME_CHARS} characters.`);
   }
+}
+
+/**
+ * The instruction an app result carries for the agent: the one step that makes the link usable.
+ *
+ * It lives in the result rather than only in the generated session type, because that type is
+ * reference material the agent read *before* it held a result -- and because the app's own content
+ * often tells the model to ignore the result and wait for the app instead. Stated here the
+ * consequence is concrete: an unsubscribed link renders perfectly well and can send nothing, which
+ * stays invisible until the person picks something and nothing arrives.
+ *
+ * Subscribing twice is not free -- the Workshop allocates a hook record per `bindHook`, and a second
+ * record is a second entry in Connections -- so the wording asks for one subscription per link
+ * rather than one per result.
+ */
+function appLinkInstruction(url: string): Extract<McpContent, { type: "text" }> {
+  return {
+    type: "text",
+    text:
+      `ACTION REQUIRED before you relay this link: call subscribeAppMessages(${JSON.stringify(url)}, ` +
+      `self) in this same turn. Until this link is subscribed the view cannot send anything back into ` +
+      `this conversation, so relaying it without subscribing leaves the person unable to send what ` +
+      `they pick. Subscribe once: skip this only if this exact url is already subscribed here.`,
+  };
 }
 
 /**
@@ -182,6 +255,48 @@ export class McpSessionBase extends RpcTarget {
       : `This binding does not grant a tool named "${name}".`;
   }
 
+  // Decorates a result with the sidecar link for one `ui://` resource.
+  //
+  // Best-effort by construction: a link is a convenience on top of a result the agent already has,
+  // so a host that cannot mint one, an endpoint that has gone away, or a server naming a resource
+  // it does not serve all leave the result exactly as the server returned it. The resource is
+  // resolved by the caller rather than here, because the two paths learn it from different places:
+  // a read tool from the result it just received, and a queued one from what the store kept beside
+  // it when the call was applied.
+  async #withAppLink(
+    result: Extract<McpCallResult, { status: "ok" }>,
+    // The `ui://` resource this call renders, or undefined when nothing named one.
+    uri: string | undefined,
+    // The tool's own title, when the catalog the call was made from still has it.
+    title: string | undefined,
+    // The server's own result: what the sidecar is handed as the outcome of the call. Wire shape,
+    // never the flattened one: the page relays it as the `tools/call` result a View parses with
+    // MCP's own schema.
+    serverResult: AppResultLike,
+    // The tool call the sidecar replays. An app is told the input and the result, never the session.
+    call: Omit<AppCallSnapshot, "result">,
+  ): Promise<Extract<McpCallResult, { status: "ok" }>> {
+    if (result.isError === true || uri === undefined) return result;
+    let url: string | undefined;
+    try {
+      url = await this.#host.appLink(uri, { ...call, result: serverResult });
+    } catch {
+      return result;
+    }
+    if (url === undefined) return result;
+    // The instruction leads the content: it is the step that makes the link do anything, and the
+    // app's own content competes for that decision by telling the model to ignore the result and
+    // wait. `text` is documented as the text blocks concatenated, so the block belongs there too --
+    // an agent that reads only `text` would otherwise never see it.
+    const instruction = appLinkInstruction(url);
+    return {
+      ...result,
+      content: [instruction, ...result.content],
+      text: result.text === "" ? instruction.text : `${instruction.text}\n\n${result.text}`,
+      app: { uri, url, title },
+    };
+  }
+
   async callTool(name: string, args?: Record<string, unknown>): Promise<McpCallResult> {
     requireToolName("callTool", name);
     const toolArgs = args ?? {};
@@ -208,7 +323,15 @@ export class McpSessionBase extends RpcTarget {
       await this.#queue.authorizeObservation({
         title, description: text, ...(fields ? { fields } : {}),
       });
-      return toCallResult(result);
+      // The result is in hand here, so both places an association can live are read: the tool's own
+      // declaration first, then the result's. A tool that names one describes every call it makes,
+      // where a result describes only the call it came from.
+      return this.#withAppLink(
+        toCallResult(result),
+        toolUiResourceUri(entry.tool) ?? uiResourceUriInResult(result),
+        entry.tool.title,
+        result,
+        { toolName: name, input: toolArgs });
     }
 
     const staged = host.stageAction(name, toolArgs);
@@ -282,8 +405,84 @@ export class McpSessionBase extends RpcTarget {
             `Read the response from the approved call to \`${stored.toolName}\` on ` +
             `**${host.serverName}**.`,
         });
-        return result;
+        // The stored copy is the flattened result, so the association is read from wherever it
+        // survived: the catalog for a tool that declares a view, and the action record for one its
+        // own result declared. `_meta` itself reaches neither.
+        const tool = await host.findTool(stored.toolName)
+          .then(entry => entry?.tool)
+          .catch(() => undefined);
+        // Rebuilt in the wire shape a View parses, since the store kept only the flattened result:
+        // `status` and `text` are this host's vocabulary, `content` is the server's.
+        const serverResult = {
+          content: result.content,
+          structuredContent: result.structuredContent,
+          isError: result.isError,
+        };
+        return this.#withAppLink(
+          result,
+          (tool && toolUiResourceUri(tool)) ?? stored.appUri,
+          tool?.title,
+          serverResult,
+          { toolName: stored.toolName, input: stored.args });
       }
     }
+  }
+
+  /**
+   * Asks to receive the messages the view of `url`'s app link sends back.
+   *
+   * `url` is the `app.url` a result carried (see `McpCallResult.app`). Subscribing does not deliver
+   * anything by itself: the subscription is a hook, born disabled, that the user enables in the
+   * Workshop's Connections UI, and the view's own page puts each message in front of them before
+   * anything is sent. Until then the app is told, when it tries, that the chat is not subscribed.
+   *
+   * `hook` is called once per message the person agreed to send, with the `ui://` resource that
+   * sent it and the sender's idempotency key. It is normally `self`, which turns the call into an
+   * ordinary callback in this chat and starts its turn; either way it must be a persistent stub,
+   * since messages arrive long after this session is gone.
+   */
+  async subscribeAppMessages(
+    url: string, hook: RpcStub<McpAppMessageHookTarget>,
+  ): Promise<void> {
+    // A link is identified by its path alone -- `/app/<account>/<token>` -- so nothing else in the
+    // URL is read, and a query or fragment the caller carried along does not make a link that opens
+    // in a browser unusable here. Anything else is refused before the account is asked, because an
+    // agent that passed the wrong url is better told now than when a view tries to send.
+    let segments: string[] = [];
+    try {
+      segments = new URL(url).pathname.split("/");
+    } catch {
+      // Not a URL at all: the empty list fails the same shape check as a wrong path.
+    }
+    const [, app, accountId, token] = segments;
+    if (app !== "app" || segments.length !== 4 || accountId === undefined || token === undefined) {
+      throw new Error(
+        `subscribeAppMessages() takes one of this server's app links -- the app.url a tool result ` +
+        `carried -- and ${JSON.stringify(url)} is not one.`);
+    }
+
+    // The account owns the link: it decides whether the token names a live link of its own, and
+    // only it can say what the resource is. A link that is gone -- expired, superseded by a later
+    // mint -- has nothing left to deliver, so subscribing to it is refused here.
+    const props = await this.#host.appMessageHookProps(accountId, token);
+    if (props === undefined) {
+      throw new Error(
+        `The app link in ${JSON.stringify(url)} is not one this account can deliver for. Ask for ` +
+        `the tool result again and subscribe to the url it returns.`);
+    }
+
+    const controller = this.#host.appMessageHook(props);
+    // The description is what the user reads in Connections before enabling, so it names the app
+    // and the server rather than the hook: the resource is the only name the link itself carries.
+    const description = {
+      title: `Messages from ${props.uri}`,
+      description:
+        `Let the view of ${props.uri}, on the MCP server **${props.serverName}**, send messages ` +
+        `into the conversation that opened its link. Each message is shown to you in the app ` +
+        `before it is sent, and nothing is delivered while this hook is disabled.`,
+    };
+    // @ts-expect-error Workers' mapped stub types widen the controller's hook type across bindHook's
+    // RPC boundary; the Google connector pins the same widening in `SharedApprovalQueue.bindHook()`.
+    await this.#queue.bindHook(controller, hook, description);
   }
 }

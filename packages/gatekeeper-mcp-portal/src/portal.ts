@@ -38,6 +38,7 @@ import {
   looksLikePortal,
   parsePortalServers,
   PORTAL_LIST_SERVERS_TOOL,
+  portalResourcePrefix,
   reconcilePortalServers,
   type PortalServer,
   type PortalServerListing,
@@ -57,6 +58,9 @@ import {
   INVALID_LINK_HTML,
 } from "@gadgets/mcp-shared/html";
 import { handleMcpHttpRequest } from "@gadgets/mcp-shared/http";
+import { appHttp } from "@gadgets/mcp-shared/app-http";
+import { AppMessageHookController as AppMessageHookControllerBase }
+  from "@gadgets/mcp-shared/app-message-hook";
 import {
   McpGatekeeperUserBase,
   mcpGatekeeperUserContext,
@@ -231,6 +235,7 @@ export default {
       accountForId: id => ctx.exports.McpAccount.get(
         ctx.exports.McpAccount.idFromString(id)),
       log: logger,
+      app: appHttp<DurableObjectStub<McpAccount>>({ baseUrl: getBaseUrl(env), log: logger }),
       connect: async (request, account, initiationNonce) => {
         if (request.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
         return continueConnect(account, initiationNonce, env);
@@ -554,6 +559,14 @@ export class McpGatekeeperImpl
     return portalTrust(this.env);
   }
 
+  /**
+   * This endpoint is a portal, so it names the resources it fronts after the upstream server that
+   * owns them -- the same prefix its tools carry.
+   */
+  protected get resourceUriPrefix(): string {
+    return portalResourcePrefix(this.ctx.props.scope.serverId);
+  }
+
   protected get sessionClass() {
     return McpSessionImpl;
   }
@@ -641,3 +654,19 @@ export class McpGatekeeperImpl
 // class to a Gadget, where it can be seen.
 @validateRpc()
 class McpSessionImpl extends McpSessionBase {}
+
+// ---------------------------------------------------------------------------
+// App-message hook
+
+// Subclassed rather than re-exported for the same reason as the session: `@validateRpc()` has to be
+// applied in this Worker's own source, since a decorator reached through `@gadgets/mcp-shared` would
+// arrive untransformed and throw.
+/**
+ * The hook controller one subscribed app link delivers through: the user enables it from the
+ * Workshop's Connections UI, which calls `enable()`, and `enable()` is what records the initiator
+ * the account starts a hook with when the app's view sends a message. The export name is the
+ * contract: `McpSessionBase.subscribeAppMessages()` mints the controller from
+ * `ctx.exports.AppMessageHookController`.
+ */
+@validateRpc()
+export class AppMessageHookController extends AppMessageHookControllerBase {}

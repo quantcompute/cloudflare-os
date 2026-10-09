@@ -424,6 +424,19 @@ export function generateSessionTypes(args: {
   lines.push("   * if the approved call failed.");
   lines.push("   */");
   lines.push("  getActionResult(actionId: number): Promise<McpCallResult>;");
+  lines.push("");
+  lines.push("  /**");
+  lines.push("   * Asks to receive the messages this app link's view sends back into the conversation.");
+  lines.push("   *");
+  lines.push("   * `url` is the `app.url` of a result (see `McpCallResult.app`). You MUST call this in the");
+  lines.push("   * same turn that you hand a link to the user, before you relay it: until the subscription");
+  lines.push("   * exists the view cannot send anything back, so the link you gave them is inert and the");
+  lines.push("   * person cannot tell why. The subscription is a hook they enable in Connections, and until");
+  lines.push("   * then the app is told the chat is not subscribed. Pass `self` as `hook`: a call to any");
+  lines.push("   * method on `self` lands in this chat as a callback whose args are the `McpAppMessage`.");
+  lines.push("   * Delivery is at least once, so key any work on the message's own `key`.");
+  lines.push("   */");
+  lines.push("  subscribeAppMessages(url: string, hook: RpcStub<McpAppMessageHook>): Promise<void>;");
   lines.push("}");
   lines.push("");
 

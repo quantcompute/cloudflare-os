@@ -31,6 +31,16 @@ function generate(tools: ClassifiedTool[], baseTypes = "// base\n"): string {
 // checker, not the 7.0.2 one the repo type-checks with -- forced, while TS 7 ships no compiler API.
 // The generated types are structural, not the inference corners where the port might plausibly differ.
 const compilerOptions: ts.CompilerOptions = { noEmit: true, strict: true };
+
+// The base types name a type from `cloudflare:workers` (the stub a subscription's hook is bound as),
+// which a real Worker resolves from its runtime. A bare TypeScript program has nothing to resolve it
+// to, so the program carries a declaration of that one module and the generated file can be checked
+// on its own.
+const RUNTIME_TYPES = `declare module "cloudflare:workers" {
+  export type RpcStub<T> = { readonly target: T };
+}
+`;
+const RUNTIME_TYPES_FILE = "cloudflare-workers.d.ts";
 const defaultHost = ts.createCompilerHost(compilerOptions);
 // One parse of the default lib (~3M chars), shared by every program; sound only because all of them
 // use the same options.
@@ -43,15 +53,21 @@ function typeScriptErrors(fileName: string, source: string): string[] {
       if (name === fileName) {
         return ts.createSourceFile(name, source, languageVersion, true, ts.ScriptKind.TS);
       }
+      if (name === RUNTIME_TYPES_FILE) {
+        return ts.createSourceFile(name, RUNTIME_TYPES, languageVersion, true, ts.ScriptKind.TS);
+      }
       if (!libFiles.has(name)) {
         libFiles.set(name, defaultHost.getSourceFile(name, languageVersion, onError));
       }
       return libFiles.get(name);
     },
-    fileExists: name => name === fileName || defaultHost.fileExists(name),
-    readFile: name => name === fileName ? source : defaultHost.readFile(name),
+    fileExists: name => name === fileName || name === RUNTIME_TYPES_FILE
+      || defaultHost.fileExists(name),
+    readFile: name => name === fileName ? source
+      : name === RUNTIME_TYPES_FILE ? RUNTIME_TYPES
+      : defaultHost.readFile(name),
   };
-  const program = ts.createProgram([fileName], compilerOptions, host);
+  const program = ts.createProgram([fileName, RUNTIME_TYPES_FILE], compilerOptions, host);
   const file = program.getSourceFile(fileName)!;
   // Only this file's diagnostics, without checking the lib: lib errors were always filtered out,
   // and generated output is a module, so nothing in it merges into a lib global.

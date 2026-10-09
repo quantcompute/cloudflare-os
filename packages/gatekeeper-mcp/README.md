@@ -184,14 +184,52 @@ flag, whose restricted mode blocks every action for the rest of the session. See
 To share the work rather than the binding, publish the Gadget as a blueprint and let each person
 connect their own server.
 
+## Sidecar apps
+
+A result whose tool names a `ui://` resource comes back with an `app` link beside its text. Opening
+it renders the server's own HTML in a sidecar tab served by this Worker: the page is the MCP Apps
+host half, the app runs inside a nested opaque-origin sandbox, and the app's `tools/call`,
+`resources/read`, and `ui/open-link` requests reach this Worker through a token-authenticated
+JSON-RPC endpoint on the link. Nothing is fetched on the agent's turn — the link is minted with the
+result, and the page loads the resource when someone opens it.
+
+An app may call only what a sidecar window can honestly be trusted with, and that rule lives in
+`@gadgets/mcp-shared` rather than here so the two connectors cannot drift apart on it: **read-only
+tools only**, inside the grant the binding already holds, never anything that would queue for
+approval. A write refused there is not downgraded and not auto-approved — the app is told to ask the
+agent in the chat instead. The link is a second way to see what the binding can already read, not a
+grant of new authority, and it never changes the endpoint's trust tier.
+
+An app may also send, and only through the person in front of it. `ui/message` — one text message
+back into the conversation that opened the link — needs that conversation to ask for it first: the
+agent calls `subscribeAppMessages(app.url, self)` on the session, and the session checks the link
+against this account, mints an `AppMessageHookController` for it (exported by this Worker), and
+binds it on the session's approval queue with a description naming the app and the server. The hook
+is born disabled, so the user's first decision is in the Workshop's Connections UI and nothing this
+connector does can enable it; their second is **Send**, in the page's consent strip, which names the
+app and the text. **Send** carries a key the page chose once for that send, so a repeat is one
+delivery to the conversation rather than two. It resolves the link's token to the stored initiator,
+starts a hook session, records the observation that puts the delivery on the audit trail, and hands
+the text to the callback the subscriber supplied — normally the agent's own `self`, which turns it
+into an `agentCallback` and starts that chat's turn, with the arguments in `env` for the code that
+runs next. **Dismiss**, a non-text request, and every refusal — a link nobody subscribed to, a hook
+that was never enabled or has since been deleted, a delivery the conversation refused — reach the
+View as a JSON-RPC error rather than as a success, and a missing subscription is refused with a
+sentence telling the user to ask the agent in the chat. The page derives its `/rpc` endpoint from
+the path alone and never forwards anything to the MCP server.
+
+The link opens a tab. It is not a sized popup: window sizing is the Workshop frontend's decision,
+the frontend has no affordance for it yet, and adding one is a separate proposal there rather than
+something this connector can do on its own.
+
 ## Notes and current limitations
 
 - **No simulation.** MCP describes no way to predict a tool's effect, so a queued call is not
   reflected in later reads. `awaitDecision` is set and the agent's turn suspends until the user
   decides.
 - **No revert.** MCP describes no inverse for a tool call, so `implementsRevert` is false.
-- **No hooks.** `notifications/tools/list_changed` is session-scoped; a Gadget hook is durable and
-  must survive restarts.
+- **No notification hooks.** `notifications/tools/list_changed` is session-scoped; a Gadget hook is
+  durable and must survive restarts.
 - **No scoping below tool names.** MCP tools take arguments, not capabilities, so "this repo only"
   cannot be expressed. A list of allowed tool names is the narrowest grant available.
 - **Only `tools/*`.** Prompts, resources, sampling, and elicitation are not implemented. Sampling
@@ -210,12 +248,23 @@ connect their own server.
   `ObservationDescription.containsRestrictedData`, so creating a share key appears to succeed and
   fails when the recipient opens it (their observer verification is refused). Fixing this needs a
   kernel change.
+- **App-view messages need a subscription and an enabled hook.** A `ui/message` reaches a
+  conversation only after an agent in it subscribes with `subscribeAppMessages(app.url, self)`, and
+  only once the user turns the resulting hook on in the Workshop's Connections UI; the connector
+  cannot enable its own hook. A decorated result opens with the instruction to take that step before
+  the link is relayed, because the agent is the only party holding the `self` a subscription delivers
+  to — which also means nothing enforces the step: an agent that relays the link without subscribing
+  leaves a view that renders and cannot send, since the page declares the message capability only
+  while a subscription is registered, so the app is given no way to send at all. A request that
+  arrives before both is refused with a sentence telling the user to ask the agent in the chat. Each
+  subscription is bound to one link and delivers only
+  text, at least once, keyed by the key the page chose for that send.
 
 ## Layout
 
 | File | Purpose |
 | --- | --- |
-| `src/mcp.ts` | Vendor, account DO, user, verifier, gatekeeper facet, session |
+| `src/mcp.ts` | Vendor, account DO, user, verifier, gatekeeper facet, session, app-message hook controller |
 | `src/connect-form.ts` | The endpoint prompt served during connect |
 | `src/server-id.ts` | Endpoint to display slug, for the binding name and session type |
 | `src/configurator/` | The grant UI (compiled into `src/generated/`) |

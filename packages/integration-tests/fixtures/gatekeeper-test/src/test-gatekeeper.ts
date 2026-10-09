@@ -53,9 +53,18 @@ interface TestThing {
   writeValues(values: number[]): Promise<number[]>;
   /** Binds a hook the integration test fires through \`/control/fire-hook\`. */
   watch(key: string, callback: ValueHook): Promise<void>;
+  /**
+   * Asks to receive the messages the view of \`appUrl\`'s app link sends back (mirrors the MCP
+   * session API). The hook is born disabled; the user enables it in the Workshop UI.
+   */
+  subscribeAppMessages(appUrl: string, hook: McpAppMessageHook): Promise<void>;
 }
 interface ValueHook {
   onValueRequested(value: number): Promise<void>;
+}
+/** One message an MCP App view asked its host to put into the conversation that opened its link. */
+interface McpAppMessageHook {
+  receiveAppMessage(message: { uri: string; text: string; key: string }): Promise<void>;
 }
 `;
 
@@ -90,6 +99,17 @@ type TestActionState = {
 
 type HookState = {
   initiator?: Fetcher<HookInitiator<ValueHook>>;
+  target?: HookTargetMetadata;
+  disableCount: number;
+};
+
+/**
+ * The stored state of one app-message hook. Like HookState, but the message the firing builds
+ * needs the `ui://` resource the link renders, so that rides along from the subscription.
+ */
+type AppMessageHookState = {
+  uri: string;
+  initiator?: Fetcher<HookInitiator<McpAppMessageHook>>;
   target?: HookTargetMetadata;
   disableCount: number;
 };
@@ -372,7 +392,93 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
   [restore]({ messageKey }: { messageKey: string }): GadgetResponseRecorder {
     return new GadgetResponseRecorder(this, messageKey);
   }
+
+  /**
+   * Records one app link, standing in for the mint a tool result would have performed: the
+   * link's token and the `ui://` resource its view renders. subscribeAppMessages() resolves
+   * against this the way the real method validates a URL against the account's link records.
+   */
+  registerAppLink(token: string, uri: string): void {
+    this.ctx.storage.kv.put(appLinkKey(token), { uri });
+  }
+
+  /**
+   * The `{token, uri}` a subscribeAppMessages() URL names, mirroring the real method's
+   * validation: the URL must be an app link (`/app/<accountId>/<token>`) and its token must be
+   * a live record. The fixture has one implicit account, so the account segment is required but
+   * not compared.
+   */
+  resolveAppLink(url: string): { token: string; uri: string } {
+    let token: string | undefined;
+    try {
+      token = /^\/app\/[^/]+\/([^/]+)$/.exec(new URL(url).pathname)?.[1];
+    } catch {
+      token = undefined;  // Not a URL at all.
+    }
+    const link = token === undefined
+      ? undefined : this.ctx.storage.kv.get<{ uri: string }>(appLinkKey(token));
+    if (token === undefined || link === undefined) {
+      throw new Error(`Not an app link minted by this account: ${url}`);
+    }
+    return { token, uri: link.uri };
+  }
+
+  /** Records the initiator an app-message hook's controller.enable() handed over. */
+  enableAppMessageHook(
+      token: string, uri: string, initiator: Fetcher<HookInitiator<McpAppMessageHook>>,
+      target: HookTargetMetadata): void {
+    this.ctx.storage.kv.put(appMessageHookKey(token), { uri, initiator, target, disableCount: 0 });
+  }
+
+  /**
+   * Keeps the initiator, like a gatekeeper that ignores disable(), so a delivery after a
+   * disable probes the Workshop's own startHook() re-check, which live firings rely on.
+   */
+  recordAppMessageHookDisable(token: string): void {
+    const state = this.ctx.storage.kv.get<AppMessageHookState>(appMessageHookKey(token));
+    if (state === undefined) return;
+    this.ctx.storage.kv.put(appMessageHookKey(token),
+        { ...state, disableCount: state.disableCount + 1 });
+  }
+
+  /**
+   * Delivers one `ui/message` the way the account does when an app view's page POSTs it: the
+   * token resolves to the initiator the user's enable() stored, the hook is started, the
+   * observation filed, and the message handed to the callback the hook was bound with.
+   */
+  async deliverAppViewMessage(
+      token: string, text: string, key: string): Promise<{ delivered: true } | { error: string }> {
+    const state = this.ctx.storage.kv.get<AppMessageHookState>(appMessageHookKey(token));
+    if (state === undefined || state.initiator === undefined) {
+      return {
+        error: "No app messages are subscribed for this link. " +
+            "Ask the agent in the chat to subscribe.",
+      };
+    }
+    try {
+      const { callback, approvalQueue } = await state.initiator.startHook();
+      try {
+        await approvalQueue.authorizeObservation({
+          title: `App message from ${state.uri}`,
+          description: "The integration test delivered this app message.",
+        });
+        await callback.receiveAppMessage({ uri: state.uri, text, key });
+      } finally {
+        callback[Symbol.dispose]();
+        approvalQueue[Symbol.dispose]();
+      }
+      return { delivered: true };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  }
 }
+
+/** Storage key holding the app-link record a test registered for one token. */
+const appLinkKey = (token: string) => `app-link:${token}`;
+
+/** Storage key holding what one app-message hook's controller recorded on enable(). */
+const appMessageHookKey = (token: string) => `app-message-hook:${token}`;
 
 /** Records each delivery rather than the latest, since delivery is at-least-once. */
 @validateRpc()
@@ -581,12 +687,31 @@ export interface TestSession {
   watch(key: string, callback: RpcStub<ValueHook>): Promise<void>;
   /** Stores a persistent stub to this connection under `key`, for `/control/call-self-stub`. */
   keepSelfStub(key: string): Promise<void>;
+  /**
+   * Asks to receive the messages the view of `url`'s app link sends back, mirroring the
+   * connector-side `McpSessionBase.subscribeAppMessages()`. The link is validated against the
+   * account's records, the controller for it is minted, and the caller's stub is bound on the
+   * Workshop's approval queue -- disabled until the user enables the hook.
+   */
+  subscribeAppMessages(url: string, hook: RpcStub<McpAppMessageHook>): Promise<void>;
 }
 
 /** The hook a gadget binds through `TestSession.watch()`. */
 export interface ValueHook extends RpcTarget {
   onValueRequested(value: number): Promise<void>;
 }
+
+/**
+ * What a subscribeAppMessages() caller hands over, mirroring the frozen `McpAppMessageHook`
+ * contract (packages/mcp-shared/src/app-message-hook.ts): one call per message, with the same
+ * shape a `ui/message` request carries.
+ */
+export interface McpAppMessageHook extends RpcTarget {
+  receiveAppMessage(message: McpAppMessage): Promise<void>;
+}
+
+/** One message an MCP App view asked its host to put into the conversation that opened its link. */
+export type McpAppMessage = { uri: string; text: string; key: string };
 
 @validateRpc()
 class TestSessionTarget extends RpcTarget implements TestSession {
@@ -649,6 +774,19 @@ class TestSessionTarget extends RpcTarget implements TestSession {
 
   async keepSelfStub(key: string): Promise<void> {
     await this.state.keepSelfStub(key, await this.ctx.restore<RpcStub<ConnectionProbe>>({}));
+  }
+
+  async subscribeAppMessages(url: string, hook: RpcStub<McpAppMessageHook>): Promise<void> {
+    const { token, uri } = await this.state.resolveAppLink(url);
+    await this.approvalQueue.bindHook(
+        // @ts-expect-error Workers currently widens the controller's hook type across bindHook RPC.
+        this.ctx.exports.TestAppMessageHookController({ props: { token, uri } }),
+        hook,
+        {
+          title: `App messages from ${uri}`,
+          description: `Allow the app at ${uri} to send messages into the conversation that ` +
+              `opened its link.`,
+        });
   }
 
   [Symbol.dispose](): void {
@@ -795,6 +933,27 @@ export class TestHookController
 
   async disable(): Promise<void> {
     await control(this.ctx.exports).recordHookDisable(this.ctx.props.key);
+  }
+}
+
+/**
+ * The hook controller for one app link, keyed by its token, mirroring the controller an MCP
+ * connector mints for a `subscribeAppMessages()` subscription. enable() carries the link's
+ * `ui://` resource along, since the firing builds its message from it.
+ */
+@validateRpc()
+export class TestAppMessageHookController
+    extends WorkerEntrypoint<Cloudflare.Env, { token: string; uri: string }>
+    implements HookController<McpAppMessageHook> {
+  async enable(
+      initiator: Fetcher<HookInitiator<McpAppMessageHook>>,
+      target: HookTargetMetadata): Promise<void> {
+    await control(this.ctx.exports).enableAppMessageHook(
+        this.ctx.props.token, this.ctx.props.uri, initiator, target);
+  }
+
+  async disable(): Promise<void> {
+    await control(this.ctx.exports).recordAppMessageHookDisable(this.ctx.props.token);
   }
 }
 
@@ -981,6 +1140,28 @@ export default {
       const { messageKey } = body as Record<string, unknown>;
       if (!isNonEmptyString(messageKey)) return badRequest("`messageKey` must be a non-empty string");
       return Response.json({ responses: await control(ctx.exports).getGadgetResponses(messageKey) });
+    }
+
+    // Register the app link a subscribeAppMessages() call will name, standing in for the mint a
+    // tool result naming a `ui://` resource would have performed.
+    // Body: {"token": "...", "uri": "..."} -> 204
+    if (url.pathname === "/control/register-app-link" && req.method === "POST") {
+      const { token, uri } = body as Record<string, unknown>;
+      if (!isNonEmptyString(token)) return badRequest("`token` must be a non-empty string");
+      if (!isNonEmptyString(uri)) return badRequest("`uri` must be a non-empty string");
+      await control(ctx.exports).registerAppLink(token, uri);
+      return new Response(null, { status: 204 });
+    }
+
+    // Deliver one ui/message the way the account does when an app view's page POSTs it: through
+    // the initiator the hook's controller stored when the user enabled it.
+    // Body: {"token", "text", "key"} -> {"delivered": true} | {"error": string}
+    if (url.pathname === "/control/deliver-app-view-message" && req.method === "POST") {
+      const { token, text, key } = body as Record<string, unknown>;
+      if (!isNonEmptyString(token)) return badRequest("`token` must be a non-empty string");
+      if (typeof text !== "string") return badRequest("`text` must be a string");
+      if (!isNonEmptyString(key)) return badRequest("`key` must be a non-empty string");
+      return Response.json(await control(ctx.exports).deliverAppViewMessage(token, text, key));
     }
 
     // Fire a hook through the initiator its controller's enable() stored.

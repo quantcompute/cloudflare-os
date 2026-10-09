@@ -13,8 +13,12 @@
 // Every nonce is single-use, time-bounded, and compared in constant time; see `connect-nonce.ts`.
 
 import { DurableObject } from "cloudflare:workers";
-import type { ConnectHandoff, GatekeeperConnectCallback, GatekeeperUser }
-  from "@gadgets/workshop-shared/gatekeeper";
+import type {
+  ConnectHandoff,
+  GatekeeperConnectCallback,
+  GatekeeperUser,
+  HookInitiator,
+} from "@gadgets/workshop-shared/gatekeeper";
 import {
   commitStagedCredentials,
   discardStagedCredentials,
@@ -28,8 +32,56 @@ import {
   type StoredOAuthClientInformation,
 } from "@modelcontextprotocol/client";
 
-import { McpAuthRequiredError, McpClient, type McpServerInfo } from "./client.js";
-import { clientName, type ConnectionEnv, type McpConnection } from "./connection.js";
+import {
+  answerAppRpc,
+  appRpcFailure,
+  appRpcSuccess,
+  appViewMessageKey,
+  appViewMessageText,
+  readAppRpc,
+  RPC_INTERNAL_ERROR,
+  RPC_INVALID_PARAMS,
+  RPC_METHOD_NOT_FOUND,
+  type AppGatewayHost,
+  type AppRpcRequest,
+} from "./app-gateway.js";
+import type {
+  AppMessageHookProps,
+  McpAppMessage,
+  McpAppMessageHookTarget,
+} from "./app-message-hook.js";
+import {
+  appLinkUrl,
+  appMessageHookKey,
+  appTokenKey,
+  appTokenLive,
+  appTokenPointerKey,
+  planAppLink,
+  type AppTokenRecord,
+} from "./app-tokens.js";
+import {
+  APP_ERROR_NOT_PERMITTED,
+  APP_MESSAGE_NOT_SUBSCRIBED,
+  appResourceUri,
+  isAppMimeType,
+  MAX_APP_HTML_BYTES,
+  viewAllowAttribute,
+  viewCsp,
+  type AppBinding,
+  type AppCallSnapshot,
+  type AppRpcReply,
+  type AppViewPage,
+  type AppViewRefusal,
+} from "./apps.js";
+import { HydratedTools, scopedCatalog } from "./catalog.js";
+import {
+  McpAuthRequiredError,
+  McpClient,
+  McpProtocolError,
+  type McpResourceContent,
+  type McpServerInfo,
+} from "./client.js";
+import { clientName, withClient, type ConnectionEnv, type McpConnection } from "./connection.js";
 import {
   ACCESS_TOKEN_SAFETY_MS,
   CONNECT_TIMEOUT_MS,
@@ -47,7 +99,8 @@ import {
 } from "./oauth.js";
 import { fetchOptions, isAllowedUrl, sdkFetch, type FetchOptions } from "./fetch.js";
 import type { McpLog } from "./log.js";
-import { sameEndpoint } from "./scope.js";
+import { sameEndpoint, scopeAllows } from "./scope.js";
+import { classifyTool, codeSpan, type ClassifiedTool } from "./tools.js";
 import { hostOf } from "./util.js";
 
 /**
@@ -185,6 +238,69 @@ function displayName(reported: string | undefined): string | undefined {
   if (cleaned.length === 0) return undefined;
   return cleaned.length > MAX_SERVER_NAME ? `${cleaned.slice(0, MAX_SERVER_NAME)}\u2026` : cleaned;
 }
+
+const encoder = new TextEncoder();
+
+// The id of a JSON-RPC message the gateway never sees, so the reply it gets is matched to the call
+// that is waiting for one instead of being dropped as an answer to something else. Null when the
+// body is not JSON or carries no usable id, which is what a reply to an unreadable request carries.
+function replyId(message: unknown): string | number | null {
+  let parsed: unknown = message;
+  if (typeof message === "string") {
+    try {
+      parsed = JSON.parse(message);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof parsed !== "object" || parsed === null || !("id" in parsed)) return null;
+  const id: unknown = parsed.id;
+  return typeof id === "string" || typeof id === "number" ? id : null;
+}
+
+// The error code of a JSON-RPC reply, or undefined for one that carries a result.
+function replyErrorCode(body: string): unknown {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== "object" || parsed === null || !("error" in parsed)) return undefined;
+    const error: unknown = parsed.error;
+    if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+    return error.code;
+  } catch {
+    return undefined;
+  }
+}
+
+// The resource one app request reads, if it reads one at all: the method says whether the request
+// named a resource, and the URI is a name the app document carries rather than request payload.
+function readRequestUri(message: unknown): string | undefined {
+  let parsed: unknown = message;
+  if (typeof message === "string") {
+    try {
+      parsed = JSON.parse(message);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const request = parsed as { method?: unknown; params?: unknown };
+  if (request.method !== "resources/read") return undefined;
+  const params = request.params as { uri?: unknown } | null | undefined;
+  return typeof params?.uri === "string" ? params.uri : undefined;
+}
+
+/**
+ * What an enabled subscription leaves in storage: the initiator one link's view messages are
+ * delivered through, beside the link's own facts so a delivery describes itself without reading the
+ * token record again.
+ *
+ * A registration is not part of the token record because it carries a live RPC stub: that record is
+ * JSON, measured against a byte budget on every mint (see `app-tokens.ts`).
+ */
+type AppMessageHookRegistration = {
+  initiator: Fetcher<HookInitiator<McpAppMessageHookTarget>>;
+  props: AppMessageHookProps;
+};
 
 /**
  * Base for a connector's account Durable Object. Subclasses supply where this Worker lives
@@ -1091,6 +1207,373 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     }
   }
 
+
+  /**
+   * Mints or reuses the sidecar link for one `ui://` resource in one binding.
+   *
+   * Reuse is what keeps these keys bounded: a tool that renders a view returns the same link for as
+   * long as its token lives, so one result per call cannot mint one record per call.
+   *
+   * A link carries no way into a conversation by itself. A caller that wants the view's messages
+   * subscribes to them (`subscribeAppMessages()`), and what that subscription files lives under this
+   * token beside the record rather than inside it (see `registerAppMessageHook`).
+   */
+  async mintAppLink(
+    binding: AppBinding,
+    resource: { uri: string; title?: string },
+    call?: AppCallSnapshot,
+  ): Promise<string> {
+    const kv = this.ctx.storage.kv;
+    const pointerKey = appTokenPointerKey(binding.endpoint, resource.uri);
+    const pointer = kv.get<string>(pointerKey);
+    const existing = pointer === undefined
+      ? undefined
+      : kv.get<AppTokenRecord>(appTokenKey(pointer));
+    const plan = planAppLink({ binding, resource, call, pointer, existing, now: Date.now() });
+    // Removed before its replacement is written, so no interruption leaves two records where the
+    // pointer names one: nothing but the pointer could ever find the other one again. A superseded
+    // token's subscription goes with its record: a link that no longer exists must not leave a
+    // capability to message its conversation behind.
+    if (plan.superseded !== undefined) {
+      kv.delete(appTokenKey(plan.superseded));
+      kv.delete(appMessageHookKey(plan.superseded));
+    }
+    kv.put(appTokenKey(plan.token), plan.record);
+    kv.put(pointerKey, plan.token);
+    if (plan.token !== pointer) {
+      this.log().info("minted app link", {
+        event: "app.link.minted",
+        serverId: binding.serverName,
+        serverHost: hostOf(binding.endpoint),
+        toolName: call?.toolName,
+        // Both names, at the moment the link becomes a URL someone will open later: the declared one
+        // is what the result carried and the window will ask for, the other is how this endpoint is
+        // addressed. A link that fails to open is then diagnosable from the log alone.
+        appUri: resource.uri,
+        resourceUri: appResourceUri(binding, resource.uri),
+      });
+    }
+    return appLinkUrl(this.baseUrl(), this.ctx.id.toString(), plan.token);
+  }
+
+  /**
+   * The `ui://` resource one live app link renders, or undefined when this account minted no such
+   * link for that token.
+   *
+   * Asked by the facet before a subscription is bound, which is the one moment a link is worth
+   * checking: a subscriber to a link that is already gone would be promised messages that can never
+   * arrive.
+   */
+  async appLinkResource(accountId: string, token: string): Promise<{ uri: string } | undefined> {
+    if (accountId !== this.ctx.id.toString()) return undefined;
+    const record = this.ctx.storage.kv.get<AppTokenRecord>(appTokenKey(token));
+    return appTokenLive(record, Date.now()) ? { uri: record.uri } : undefined;
+  }
+
+  /**
+   * Files the initiator one app link's view messages are delivered through.
+   *
+   * Called by `AppMessageHookController.enable()` once the user has enabled the subscription in the
+   * Workshop, and is what makes a later `ui/message` anything more than a refusal. The registration
+   * carries a real native RPC stub, so a connector that puts `@validateRpc()` on its account class
+   * must mark this method `@skipRpcValidation()`: the decorator wraps stub-typed arguments in a
+   * Proxy, which Durable Object storage refuses to store. Neither MCP connector decorates its account
+   * today; this is a note for whoever does.
+   */
+  async registerAppMessageHook(
+    props: AppMessageHookProps,
+    initiator: Fetcher<HookInitiator<McpAppMessageHookTarget>>,
+  ): Promise<void> {
+    const record = this.ctx.storage.kv.get<AppTokenRecord>(appTokenKey(props.token));
+    if (props.accountId !== this.ctx.id.toString() || !appTokenLive(record, Date.now())) {
+      // Nothing could be delivered for a link this account does not hold, or one that is no longer
+      // live. Refused rather than filed and forgotten: the registration would be storage nothing
+      // would ever collect, and the user's enable action would have promised a delivery that
+      // cannot happen. The refusal reaches the Workshop's enable flow, which is where the user is
+      // looking.
+      this.ctx.storage.kv.delete(appMessageHookKey(props.token));
+      throw new Error("This app link has expired. Ask the agent in the chat for a new result.");
+    }
+    this.ctx.storage.kv.put<AppMessageHookRegistration>(appMessageHookKey(props.token), {
+      initiator, props,
+    });
+  }
+
+  /** Forgets the initiator one app link's view messages were delivered through, if any. */
+  async unregisterAppMessageHook(props: AppMessageHookProps): Promise<void> {
+    this.ctx.storage.kv.delete(appMessageHookKey(props.token));
+  }
+
+  /**
+   * Resolves a link into everything the page renders, fetching the app's HTML.
+   *
+   * Every way this can fail is a refusal rather than a throw: the caller is a page in a browser, and
+   * the sentence it is given is the whole recovery path its reader has.
+   */
+  async openAppView(token: string): Promise<AppViewPage | AppViewRefusal> {
+    const record = this.ctx.storage.kv.get<AppTokenRecord>(appTokenKey(token));
+    if (record === undefined) {
+      this.log().warn("app link names no record", { event: "app.link.unknown" });
+      return {
+        refusal: "This is not a link this account issued. Ask the agent in the chat for a new result.",
+      };
+    }
+    // `serverId` carries the binding's own name for the server: on an app line the host alone does
+    // not say which product a reviewer is looking at. It is already capped and flattened. The two
+    // URIs are the link's own name for the resource and the name this endpoint answers to, which
+    // differ for a binding that renames: a read that fails is unreadable without both.
+    const resourceUri = appResourceUri(record.binding, record.uri);
+    const log = this.log().with({
+      serverId: record.binding.serverName,
+      serverHost: hostOf(record.binding.endpoint),
+      toolName: record.call?.toolName,
+      appUri: record.uri,
+      resourceUri,
+    });
+    if (!appTokenLive(record, Date.now())) {
+      log.warn("app link has expired", { event: "app.link.expired" });
+      return { refusal: "This app link has expired. Ask the agent in the chat for a new result." };
+    }
+
+    let contents: McpResourceContent[];
+    try {
+      contents = await withClient(
+        this.env, this, record.binding.endpoint,
+        client => client.readResource(resourceUri),
+      );
+    } catch (err) {
+      // A portal relays an upstream failure as a JSON-RPC error whose message is only
+      // "Server error: HTTP 400"; the code and `data` are what say which upstream refused and why.
+      // Diagnostics only, so a `data` that will not serialize is dropped rather than allowed to
+      // break the log call.
+      let errorData: string | undefined;
+      if (err instanceof McpProtocolError && err.data !== undefined) {
+        try {
+          errorData = JSON.stringify(err.data);
+        } catch {
+          errorData = undefined;
+        }
+      }
+      log.warn("could not read app resource", {
+        event: "app.resource.read.failed",
+        error: err,
+        errorCode: err instanceof McpProtocolError ? err.code : undefined,
+        errorData,
+      });
+      return {
+        refusal: "This app could not be read from its MCP server. Open the link again from the chat.",
+      };
+    }
+
+    // Only a document is taken from the resource's contents: nothing else in them is this page's
+    // business. An absent one covers both a resource the server has stopped serving and one it now
+    // serves as something this host cannot render.
+    const content = contents.find(item =>
+      isAppMimeType(item.mimeType) && item.text !== undefined);
+    if (content?.text === undefined) {
+      log.warn("app resource has no document", { event: "app.resource.unusable" });
+      return {
+        refusal: "The MCP server is not serving a document this app can open. Ask the agent " +
+          "in the chat for a new result.",
+      };
+    }
+    if (encoder.encode(content.text).byteLength > MAX_APP_HTML_BYTES) {
+      log.warn("app document is too large", { event: "app.resource.too-large" });
+      return {
+        refusal: "This app's document is too large to open. Ask the agent in the chat for a new one.",
+      };
+    }
+
+    const csp = viewCsp(content.ui);
+    const allow = viewAllowAttribute(content.ui);
+    // The applied policy is the audit record of what a third-party document may reach. The link's
+    // token is deliberately absent: it is the capability itself, and this line is not where one goes.
+    log.info("opened app view", {
+      event: "app.view.opened", appCsp: csp, appAllow: allow,
+    });
+    // Whether the window may send a message back is a property of stored state, never of the
+    // document: the server is told nothing and can ask for nothing. What the page is shown is
+    // whether a subscription is registered for this link -- the user's own enable action, stored
+    // beside the token (see `registerAppMessageHook`).
+    return {
+      uri: record.uri, title: record.title, html: content.text, csp, allow, call: record.call,
+      canMessage: this.#appMessageHook(token) !== undefined,
+    };
+  }
+
+  /**
+   * Answers one JSON-RPC message from an open sidecar page.
+   *
+   * `message` is whatever the page sent, unparsed: the framing is read here so that one method can
+   * be answered without the gateway -- `ui/message`, delivered through the subscription registered
+   * for this link -- and everything else is handed to the gateway, which also owns what to say to a
+   * body that is not JSON at all.
+   */
+  async callApp(token: string, message: unknown): Promise<AppRpcReply> {
+    const record = this.ctx.storage.kv.get<AppTokenRecord>(appTokenKey(token));
+    if (!appTokenLive(record, Date.now())) {
+      // Not a call the gateway can answer: the record it would check the call against is gone. Framed
+      // here, under the one refusal code this protocol defines, because a page that outlived its link
+      // has no other way to hear about it.
+      this.log().warn("app call on a link that is not live", { event: "app.call.refused" });
+      // The subscription goes with the link it belonged to: nothing can be delivered through a token
+      // no record names any more.
+      this.ctx.storage.kv.delete(appMessageHookKey(token));
+      return appRpcFailure(replyId(message), APP_ERROR_NOT_PERMITTED,
+        "This app link is no longer usable. Open it again from the chat.");
+    }
+    const host: AppGatewayHost = {
+      findTool: name => this.boundTool(record.binding, name),
+      resourceUri: uri => appResourceUri(record.binding, uri),
+      call: (fn, options) => withClient(this.env, this, record.binding.endpoint, fn, options),
+    };
+    // `ui/message` is answered here, before the gateway, because delivery needs the subscription
+    // stored beside this link and the gateway is pure -- no storage, no stub, no callback. A link
+    // with no subscription is told so in a sentence its sender can act on; every other method the
+    // gateway refuses as unknown, which is what a method this host does not implement gets.
+    const read = readAppRpc(message);
+    if (read.ok && read.method === "ui/message") {
+      const reply = await this.#deliverAppMessage(token, read);
+      this.logAppCall(record, message, reply);
+      return reply;
+    }
+    const reply = await answerAppRpc(read, host);
+    this.logAppCall(record, message, reply);
+    return reply;
+  }
+
+  // The registration this link's messages are delivered through, or undefined when the user has
+  // enabled no subscription for it. Read from storage alone: a registration is the only thing this
+  // connector holds that can reach a conversation, and it exists only while its link and its hook
+  // both do.
+  #appMessageHook(token: string): AppMessageHookRegistration | undefined {
+    return this.ctx.storage.kv.get<AppMessageHookRegistration>(appMessageHookKey(token));
+  }
+
+  // Delivers one `ui/message` through the subscription registered for this link's token.
+  //
+  // The page has already shown the person the text and taken their answer, so this is the delivery
+  // itself. What may be delivered is decided by `#appMessageDelivery` (text blocks of a user message
+  // and a usable key, nothing else). A link with no registration was never promised a way into a
+  // conversation -- its page renders no Send button -- and a caller that tries anyway is told the
+  // one thing that would change that.
+  async #deliverAppMessage(token: string, read: AppRpcRequest): Promise<AppRpcReply> {
+    const registration = this.#appMessageHook(token);
+    if (registration === undefined) {
+      return appRpcFailure(read.id, RPC_METHOD_NOT_FOUND, APP_MESSAGE_NOT_SUBSCRIBED);
+    }
+    const delivery = this.#appMessageDelivery(read, registration.props.uri);
+    if ("reply" in delivery) return delivery.reply;
+    try {
+      // One firing of the hook: the queue it returns revalidates the subscription on every call, so
+      // one disabled or deleted in the meantime refuses the message rather than authorizing a
+      // delivery under a scope that has since shrunk. The observation records what the app sent,
+      // under the link's own name for the server, and the callback is whoever asked to receive it.
+      using firing = await registration.initiator.startHook();
+      await firing.approvalQueue.authorizeObservation({
+        title: `${registration.props.serverName}: message from an app`,
+        description:
+          `Delivered a message the view of ${codeSpan(registration.props.uri)} asked its host ` +
+          `to put into the conversation that opened its link. The person it was sent as agreed ` +
+          `to it in the app first.`,
+      });
+      await firing.callback.receiveAppMessage(delivery.message);
+    } catch (err) {
+      // The subscription may have been disabled, its link may have expired, or the conversation may
+      // be gone. Either way the sender is told the message did not land rather than left believing
+      // it did.
+      this.log().warn("could not deliver an app view message", {
+        event: "app.message.failed", error: err,
+      });
+      return appRpcFailure(read.id, RPC_INTERNAL_ERROR,
+        "The message could not be delivered to the conversation. Open the chat and try again.");
+    }
+    return appRpcSuccess(read.id, {});
+  }
+
+  // The message one `ui/message` request asks this host to deliver, or the refusal when the request
+  // is not one this host can carry. The idempotency key -- the sender's when it declared a usable
+  // one, random otherwise -- is chosen in one place, so no path can deliver what another refuses.
+  #appMessageDelivery(
+    read: AppRpcRequest, uri: string,
+  ): { message: McpAppMessage } | { reply: AppRpcReply } {
+    const text = appViewMessageText(read.params);
+    if (text === undefined) {
+      return {
+        reply: appRpcFailure(read.id, RPC_INVALID_PARAMS,
+          "This host can deliver a message made of text blocks only."),
+      };
+    }
+    const key = appViewMessageKey(read.params);
+    if (key.kind === "invalid") {
+      // Refused rather than delivered under a key of this host's choosing: the sender's own retries
+      // would use the key it sent, and a delivery it cannot recognise is one it may repeat.
+      return {
+        reply: appRpcFailure(read.id, RPC_INVALID_PARAMS,
+          "The message's idempotency key is not usable."),
+      };
+    }
+    return {
+      message: { uri, text, key: key.kind === "chosen" ? key.key : crypto.randomUUID() },
+    };
+  }
+
+
+  // Definitions fetched by name for tools a bounded catalog omitted, per activation.
+  #hydrated = new HydratedTools();
+
+  // The app side's half of the gateway: what this binding grants, and a client to call it with.
+  //
+  // This is the complement of what the agent sees, not a copy of it. The agent's list drops tools
+  // whose visibility excludes the model; an app's must not, because a tool the server marked
+  // `visibility: ["app"]` exists only to be called from a sidecar. What both sides share is the
+  // grant: `scopeAllows` is the one predicate for it here, and the gateway -- which owns the
+  // read-only and visibility checks -- never applies it itself.
+  private async boundTool(binding: AppBinding, name: string): Promise<ClassifiedTool | undefined> {
+    // A store that remembers nothing, so the catalog is read from the endpoint on every call. What
+    // the gateway decides from it is the server's own claim about a tool, and the app path is the one
+    // path with no approval prompt behind it to catch a claim that changed since it was read.
+    const catalog = await scopedCatalog({
+      store: { get: () => undefined, put: () => undefined },
+      log: this.log(),
+      env: this.env,
+      account: this,
+      endpoint: binding.endpoint,
+      scope: binding.scope,
+      trust: binding.trust,
+    });
+    if (!scopeAllows(binding.scope, name, catalog.isPortal)) return undefined;
+    const described = catalog.tools.find(entry => entry.tool.name === name);
+    if (described || !catalog.truncated) return described;
+    // Past the cut of a bounded catalog, where only a lookup by name can say whether the tool exists.
+    const tool = await this.#hydrated.resolve(name, candidate =>
+      withClient(this.env, this, binding.endpoint, client => client.findTool(candidate)));
+    return tool && classifyTool(tool, binding.trust);
+  }
+
+  // The outcome of a call is read back off the reply the page is about to receive, since the gateway
+  // is deliberately pure and holds no logger. Only the code is taken from it: the message is a
+  // sentence written for the user, and neither the request nor its result belongs in a log line.
+  // What a failing read was addressed to is the exception -- the URI is a name, and the name it went
+  // out under is the one thing an operator cannot reconstruct from a refusal.
+  private logAppCall(record: AppTokenRecord, message: unknown, reply: AppRpcReply): void {
+    const read = readRequestUri(message);
+    const log = this.log().with({
+      serverId: record.binding.serverName,
+      serverHost: hostOf(record.binding.endpoint),
+      toolName: record.call?.toolName,
+      resourceUri: read === undefined ? undefined : appResourceUri(record.binding, read),
+    });
+    const code = replyErrorCode(reply.body);
+    if (code === undefined) {
+      log.info("answered app call", { event: "app.call.completed" });
+    } else if (code === APP_ERROR_NOT_PERMITTED) {
+      // The policy refusal: a write tool, a tool outside the grant, or one the server hides from apps.
+      log.warn("refused app call", { event: "app.call.refused" });
+    } else {
+      log.warn("app call failed", { event: "app.call.failed" });
+    }
+  }
 
   async alarm(): Promise<void> {
     // Armed only for a first connect, so reaching here means one never finished. The test is whether

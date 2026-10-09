@@ -4,6 +4,8 @@
 // coding agent always has them in scope. One method per tool and `callTool` overloads are generated
 // from the server's own tool catalog and appended below this file's contents.
 
+import type { RpcStub } from "cloudflare:workers";
+
 /** A block of content returned by an MCP tool. */
 export type McpContent =
   | { type: "text"; text: string }
@@ -29,6 +31,22 @@ export type McpCallResult =
       structuredContent?: unknown;
       /** True when the tool itself reported failure (the call succeeded; the tool did not). */
       isError?: boolean;
+      /**
+       * Present when this result has an interactive view. **Before you relay `url` to the user you
+       * MUST call `subscribeAppMessages(url, self)` in this same turn.** Until the link is
+       * subscribed the view cannot send anything back into this conversation: a person who opens a
+       * link that was never subscribed can pick a prompt and have nothing arrive, and nothing tells
+       * them why. Opening `url` renders the same result in a sidecar window, with live access to
+       * this server's read-only tools.
+       */
+      app?: {
+        /** The `ui://` resource that renders this result. */
+        uri: string;
+        /** Link to open. Single-use-free and reusable while the account stays connected. */
+        url: string;
+        /** Display name for the link, when the server gave one. */
+        title?: string;
+      };
     }
   | {
       status: "pending";
@@ -47,6 +65,28 @@ export type McpCallResult =
       /** The approved call failed. Its message says whether it may have taken effect. */
       message: string;
     };
+
+/** One message an app view asked its host to put into the conversation that opened its link. */
+export type McpAppMessage = {
+  /** The `ui://` resource whose view sent this message. */
+  uri: string;
+  /** The message body, exactly as the app wrote it. */
+  text: string;
+  /** The sender's idempotency key. Delivery is at-least-once, so key your work on it. */
+  key: string;
+};
+
+/**
+ * What `subscribeAppMessages` delivers into: one method, called once per message the app's view
+ * sent, after the person using the app agreed to send it.
+ *
+ * `self` already satisfies this -- a call to any method on `self` lands in this chat as a callback --
+ * so an agent normally passes `self` and defines nothing of its own. The callback's one argument is
+ * the `McpAppMessage` above.
+ */
+export interface McpAppMessageHook {
+  receiveAppMessage(message: McpAppMessage): Promise<void>;
+}
 
 /** How this deployment classified one tool. */
 export type McpToolMode =

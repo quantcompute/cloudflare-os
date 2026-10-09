@@ -58,6 +58,9 @@ import {
   INVALID_LINK_HTML,
 } from "@gadgets/mcp-shared/html";
 import { handleMcpHttpRequest } from "@gadgets/mcp-shared/http";
+import { appHttp } from "@gadgets/mcp-shared/app-http";
+import { AppMessageHookController as AppMessageHookControllerBase }
+  from "@gadgets/mcp-shared/app-message-hook";
 import {
   McpGatekeeperUserBase,
   mcpGatekeeperUserContext,
@@ -103,6 +106,7 @@ export default {
       accountForId: id => ctx.exports.McpAccount.get(
         ctx.exports.McpAccount.idFromString(id)),
       log: logger,
+      app: appHttp<DurableObjectStub<McpAccount>>({ baseUrl: getBaseUrl(env), log: logger }),
       connect: async (request, account, initiationNonce, path) => {
         if (request.method !== "GET" && request.method !== "POST") {
           return new Response("Method Not Allowed", { status: 405 });
@@ -495,3 +499,19 @@ export class McpGatekeeperImpl
 // class to a Gadget, where it can be seen.
 @validateRpc()
 class McpSessionImpl extends McpSessionBase {}
+
+// ---------------------------------------------------------------------------
+// App-message hook
+
+// Subclassed rather than re-exported for the same reason as the session: `@validateRpc()` has to be
+// applied in this Worker's own source, since a decorator reached through `@gadgets/mcp-shared` would
+// arrive untransformed and throw.
+/**
+ * The hook controller one subscribed app link delivers through: the user enables it from the
+ * Workshop's Connections UI, which calls `enable()`, and `enable()` is what records the initiator
+ * the account starts a hook with when the app's view sends a message. The export name is the
+ * contract: `McpSessionBase.subscribeAppMessages()` mints the controller from
+ * `ctx.exports.AppMessageHookController`.
+ */
+@validateRpc()
+export class AppMessageHookController extends AppMessageHookControllerBase {}

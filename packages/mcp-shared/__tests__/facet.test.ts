@@ -1,6 +1,8 @@
 import { expect, it, vi } from "vitest";
 
 import { McpFacetBase } from "../src/facet.js";
+import type { AppBinding } from "../src/apps.js";
+import type { AppMessageHookProps } from "../src/app-message-hook.js";
 import { McpSessionBase } from "../src/session.js";
 import { classifyTool, type ServerTrust } from "../src/tools.js";
 import type { McpClient, McpTool } from "../src/client.js";
@@ -97,6 +99,86 @@ it("builds tool methods and falls back to the plain session when catalog loading
 it("keeps facets owner-only using the connector's resource label", async () => {
   await expect(facet().addObserver("observer", {} as never))
     .rejects.toThrow(/test server.*only be opened by its owner/s);
+});
+
+it("mints a link under this endpoint's own resource naming", async () => {
+  const minted: AppBinding[] = [];
+  class RenamingFacet extends TestFacet {
+    protected override get resourceUriPrefix(): string { return "portal-server_"; }
+    protected override account(): ConnectionAccount {
+      return {
+        mintAppLink: async (binding: AppBinding) => {
+          minted.push(binding);
+          return "https://gadgets.example/app/token";
+        },
+      } as unknown as ConnectionAccount;
+    }
+  }
+  const subject = new RenamingFacet({
+    props: { endpoint: "https://example.com/mcp", scope: {} },
+    storage: { kv: {} },
+  } as never, {});
+  const url = await subject.appLink(
+    "ui://demo/dashboard", { toolName: "get_mcp_app_demo", input: {} });
+
+  expect(url).toBe("https://gadgets.example/app/token");
+  expect(minted[0]?.resourceUriPrefix).toBe("portal-server_");
+  expect(minted[0]?.endpoint).toBe("https://example.com/mcp");
+});
+
+it("mints the hook controller from the connector's own exports", () => {
+  const minted: AppMessageHookProps[] = [];
+  const ctx = {
+    props: { endpoint: "https://example.com/mcp", scope: {} },
+    storage: { kv: {} },
+    exports: {
+      AppMessageHookController: ({ props }: { props: AppMessageHookProps }) => {
+        minted.push(props);
+        return "controller";
+      },
+    },
+  };
+  const subject = new TestFacet(ctx as never, {});
+  const props: AppMessageHookProps = {
+    accountId: "a1".repeat(32),
+    token: "c".repeat(64),
+    uri: "ui://demo/dashboard",
+    serverName: "Test",
+  };
+
+  // The connector's entry module owns the export -- a shared package cannot type or reach either
+  // Worker's own -- so the facet names it and hands back exactly what it minted.
+  expect(subject.appMessageHook(props) as unknown).toBe("controller");
+  expect(minted).toEqual([props]);
+});
+
+it("resolves a live link's props from the account, and nothing for a link it does not hold", async () => {
+  const asked: [string, string][] = [];
+  class LinkFacet extends TestFacet {
+    protected override account(): ConnectionAccount {
+      return {
+        appLinkResource: async (accountId: string, token: string) => {
+          asked.push([accountId, token]);
+          return token === "live" ? { uri: "ui://demo/dashboard" } : undefined;
+        },
+      } as unknown as ConnectionAccount;
+    }
+  }
+  const subject = new LinkFacet({
+    props: { endpoint: "https://example.com/mcp", scope: {} },
+    storage: { kv: {} },
+  } as never, {});
+
+  // The account owns the token record; the server's name is the facet's own fact, so the two are
+  // merged here rather than stored by either alone.
+  await expect(subject.appMessageHookProps("a1".repeat(32), "live")).resolves.toEqual({
+    accountId: "a1".repeat(32),
+    token: "live",
+    uri: "ui://demo/dashboard",
+    serverName: "Test",
+  });
+  await expect(subject.appMessageHookProps("a1".repeat(32), "gone")).resolves.toBeUndefined();
+  expect(asked).toEqual([["a1".repeat(32), "live"], ["a1".repeat(32), "gone"]]);
 });
 
 it("discovers and resolves tools beyond the initially described catalog", async () => {
