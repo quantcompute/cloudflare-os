@@ -286,8 +286,8 @@ The portal **renames the resources it fronts**, exactly as it namespaces tools a
 an upstream's `ui://demo/dashboard` as `mcp-app-server_ui://demo/dashboard`, and the view a tool
 declares in `_meta.ui.resourceUri` is the upstream's plain `ui://` name. This connector supplies
 `resourceUriPrefix`, so that declared name is prefixed once —
-`ui://SuiteApps/…/prompt-library-app/mcp-app.html` becomes
-`netsuite-sb1_ui://SuiteApps/…/prompt-library-app/mcp-app.html`, the name the portal's own
+`ui://apps/…/prompt-library-app/mcp-app.html` becomes
+`scoped-server_ui://apps/…/prompt-library-app/mcp-app.html`, the name the portal's own
 `resources/list` publishes — and that prefixed name is the app's identity and the name its window asks
 for. The portal also *decorates* advertised URIs with a `?server_id=` routing parameter; that is not
 part of a resource's identity and a read carrying it is refused, so `canonicalAppUri` drops it. The
@@ -300,8 +300,8 @@ both names (`appUri`, `resourceUri`), and `appResourceName` on the view lines re
 used, which is the pair to read when a link fails to open.
 
 The same prefix resolves the tools an app calls: a window's `tools/call` names the tool the way its
-own document knows it — the upstream's own name, e.g. `ns_getSuiteQLMetadata` — and the binding
-prefixes it once so the call reaches the endpoint under the name it answers, `netsuite-sb1_ns_getSuiteQLMetadata`
+own document knows it — the upstream's own name, e.g. `records_getMetadata` — and the binding
+prefixes it once so the call reaches the endpoint under the name it answers, `scoped-server_records_getMetadata`
 (see `appToolNames` and `boundTool`). Without that, a working app would be refused with "this binding
 does not grant it" for a tool the grant plainly allows, because it belongs to the scoped server only
 under its namespaced name.

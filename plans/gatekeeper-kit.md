@@ -3341,7 +3341,7 @@ recorded here because the pass found it. Each entry names why it waits and what 
   results, and `SingleFlight` fixes it locally. Google coalesces at the account (§4.13). *Trigger:*
   a second consumer outside `CredentialSource`.
 - **`Retry-After` parser.** Slack, Google, Cloudflare observability and internal Jira parse it under
-  different fallbacks and caps; internal Zip and NetSuite pass it through. *Trigger:* the next
+  different fallbacks and caps; internal Zip and an internal ERP connector pass it through. *Trigger:* the next
   hand-written retry loop.
 - **Hook delivery** (`startHook`, observe, deliver, dispose). Only email and scheduler produce hooks,
   with different policies. *Trigger:* a third producer.

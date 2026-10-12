@@ -104,7 +104,7 @@ export type AppBinding = {
   * either way.
   *
   * The same prefix is this endpoint's namespacing of the tool names it fronts (see `appToolNames`):
-  * a portal serves an upstream `ns_getSuiteQLMetadata` as `{serverId}_ns_getSuiteQLMetadata`, which
+  * a portal serves an upstream `records_getMetadata` as `{serverId}_records_getMetadata`, which
   * is the name an app's `tools/call` reaches it under.
   */
  resourceUriPrefix?: string;
@@ -212,7 +212,7 @@ export function isUiUri(uri: string): boolean {
  * Query parameters that belong to this deployment, never to the resource a URI names.
  *
  * `server_id` is one a portal injects into the app URIs it advertises: the portal routes by it, and
- * one such portal (fnbullion's NetSuite connector) answers a read forwarded with it with an HTTP
+ * one such portal (a real upstream MCP connector) answers a read forwarded with it with an HTTP
  * 400. None of them may reach an endpoint, whatever put one there.
  */
 export const APP_HOST_OWNED_URI_PARAMS: readonly string[] = [
@@ -281,7 +281,7 @@ export function appResourceNames(binding: AppBinding, uri: string): string[] {
  * own document knows.
  *
  * A portal namespaces the tools it fronts exactly as it namespaces their resources: it serves an
- * upstream `ns_getSuiteQLMetadata` as `netsuite-sb1_ns_getSuiteQLMetadata`, so an app that calls the
+ * upstream `records_getMetadata` as `scoped-server_records_getMetadata`, so an app that calls the
  * upstream's own name (which is all its document can know) would otherwise be refused as one this
  * binding does not grant. The binding's namespacing prefix is the one `AppBinding.resourceUriPrefix`
  * already holds, applied idempotently, so a name that already carries it is used as it is. The app

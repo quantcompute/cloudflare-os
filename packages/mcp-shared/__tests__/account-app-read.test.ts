@@ -11,11 +11,11 @@ import { McpAccountBase, type AccountEnv, type ConnectedServer } from "../src/ac
 import { appTokenKey, type AppTokenRecord } from "../src/app-tokens.js";
 
 const ENDPOINT = "https://mcp.example.com/mcp";
-const PLAIN_URI = "ui://SuiteApps/app/index.html";
-const DECLARED_URI = `${PLAIN_URI}?server_id=netsuite-sb1`;
+const PLAIN_URI = "ui://apps/app/index.html";
+const DECLARED_URI = `${PLAIN_URI}?server_id=scoped-server`;
 // The binding's renamed name, tried first, and the resource's own `ui://` name, tried only after it
 // (see `appResourceNames`). The decorated `DECLARED_URI` is never one of them.
-const BINDING_URI = `netsuite-sb1_${PLAIN_URI}`;
+const BINDING_URI = `scoped-server_${PLAIN_URI}`;
 
 function contextFor(values: Map<string, unknown>) {
  return {
@@ -89,10 +89,10 @@ function accountWithReads(
  const record: AppTokenRecord = {
   binding: {
    endpoint: ENDPOINT,
-   serverName: "Portal / netsuite-sb1",
-   scope: { serverId: "netsuite-sb1" },
+   serverName: "Portal / scoped-server",
+   scope: { serverId: "scoped-server" },
    trust: "byo",
-   resourceUriPrefix: "netsuite-sb1_",
+   resourceUriPrefix: "scoped-server_",
   },
   uri: DECLARED_URI,
   createdAt: Date.now(),
@@ -182,7 +182,7 @@ describe("reading an app's own resource", () => {
    [BINDING_URI]: {
     contents: [{ uri: BINDING_URI, mimeType: "text/plain", text: "not a document" }],
    },
-  }, log, [{ uri: "ui://SuiteApps/com.netsuite.mcpstandardtools/reports/mcp-app.html" }]);
+  }, log, [{ uri: "ui://apps/com.example.mcpstandardtools/reports/mcp-app.html" }]);
 
   const view = await account.openAppView("tok");
 
@@ -199,7 +199,7 @@ describe("reading an app's own resource", () => {
   expect(listed?.fields).toMatchObject({
    resourceUri: BINDING_URI,
    appResourceCount: 1,
-   appResourceNames: "ui://SuiteApps/com.netsuite.mcpstandardtools/reports/mcp-app.html",
+   appResourceNames: "ui://apps/com.example.mcpstandardtools/reports/mcp-app.html",
   });
   const unusable = events.find(event => event.fields.event === "app.resource.unusable");
   expect(unusable?.fields).toMatchObject({
@@ -211,7 +211,7 @@ describe("reading an app's own resource", () => {
   const { log, events } = recordingLog();
   const { account } = accountWithReads({
    [BINDING_URI]: { error: { code: -32602, message: "Resource not found" } },
-  }, log, [{ uri: "ui://SuiteApps/com.netsuite.mcpstandardtools/reports/mcp-app.html" }]);
+  }, log, [{ uri: "ui://apps/com.example.mcpstandardtools/reports/mcp-app.html" }]);
 
   const view = await account.openAppView("tok");
 

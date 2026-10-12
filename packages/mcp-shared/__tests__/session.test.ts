@@ -333,7 +333,7 @@ it("names a declared resource the way a renaming binding serves it", async () =>
     endpoint: "https://mcp.example.com",
     scope: {},
     findTool: async () => classifyTool(tool, "byo"),
-    normalizeAppResourceUri: (uri: string) => `netsuite-sb1_${uri}`,
+    normalizeAppResourceUri: (uri: string) => `scoped-server_${uri}`,
     appLink: async (uri: string) => {
       minted.push(uri);
       return `https://gadgets.example/app/${uri}`;
@@ -347,8 +347,8 @@ it("names a declared resource the way a renaming binding serves it", async () =>
   const result = await session.callTool("jira_search_issues");
 
   if (result.status !== "ok") throw new Error("expected an ok result");
-  expect(result.app?.uri).toBe("netsuite-sb1_ui://jira/search");
-  expect(minted).toEqual(["netsuite-sb1_ui://jira/search"]);
+  expect(result.app?.uri).toBe("scoped-server_ui://jira/search");
+  expect(minted).toEqual(["scoped-server_ui://jira/search"]);
 });
 
 it("subscribes to an app link through the props the account resolves", async () => {
@@ -447,14 +447,14 @@ it("accepts the link a connector mints under its own base path", async () => {
   const props: AppMessageHookProps = {
     accountId: "4f".repeat(32),
     token: "32".repeat(32),
-    uri: "netsuite-sb1_ui://SuiteApps/com.netsuite.mcpstandardtools/universal-selector/index.html",
-    serverName: "MCP Server Portal (mcp.fnbullion.com) / netsuite-sb1",
+    uri: "scoped-server_ui://apps/com.example.mcpstandardtools/universal-selector/index.html",
+    serverName: "MCP Server Portal (mcp.example.com) / scoped-server",
   };
   const asked: [string, string][] = [];
   const bound: unknown[] = [];
   const host = {
     serverName: props.serverName,
-    endpoint: "https://mcp.fnbullion.com/mcp",
+    endpoint: "https://mcp.example.com/mcp",
     scope: {},
     appMessageHookProps: async (accountId: string, token: string) => {
       asked.push([accountId, token]);
