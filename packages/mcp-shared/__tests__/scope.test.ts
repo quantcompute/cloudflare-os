@@ -49,6 +49,27 @@ describe("parseToolScope", () => {
     }
   });
 
+  it("reads a Code Mode scope", () => {
+    const scope = parseToolScope(`${ENDPOINT}#codemode=search_and_execute`);
+    expect(scope).toEqual({
+      serverId: undefined,
+      tools: undefined,
+      codeMode: "search_and_execute",
+    });
+    // It is a restriction, not the whole endpoint: the facet must not treat it as an unscoped grant.
+    expect(isWholeEndpoint(scope)).toBe(false);
+  });
+
+  it("rejects an unrecognized code mode rather than falling back to the whole endpoint", () => {
+    // An empty scope is the widest grant there is -- every tool the portal enables -- so a mangled
+    // fragment must not silently arrive there. The portal itself would refuse an unknown mode too.
+    for (const fragment of [
+      "#codemode=off", "#codemode=execute_and_search", "#codemode=", "#codemode",
+    ]) {
+      expect(() => parseToolScope(`${ENDPOINT}${fragment}`), fragment).toThrow(/code mode/i);
+    }
+  });
+
   it("treats no fragment at all as the whole endpoint", () => {
     expect(isWholeEndpoint(parseToolScope(`${ENDPOINT}#`))).toBe(true);
     expect(isWholeEndpoint(parseToolScope(ENDPOINT))).toBe(true);
@@ -98,6 +119,25 @@ describe("formatToolScope", () => {
 
   it("leaves an unscoped endpoint untouched", () => {
     expect(formatToolScope(ENDPOINT, {})).toBe(ENDPOINT);
+  });
+
+  it("renders a code-mode scope as the mode and nothing else", () => {
+    // `server` and `tool` cannot be enforced inside the portal's sandbox, so a grant that named them
+    // beside the mode would describe a restriction that does not exist.
+    expect(formatToolScope(ENDPOINT, {
+      codeMode: "search_and_execute", serverId: "gh", tools: ["gh_a"],
+    })).toBe(`${ENDPOINT}#codemode=search_and_execute`);
+  });
+
+  it("round-trips a code-mode scope through the fragment it describes", () => {
+    // `describe()` renders the scope and the result is parsed again, so the two must agree on the
+    // exact fragment, including the mode's spelling.
+    const scope = { codeMode: "search_and_execute" } as const;
+    const url = formatToolScope(ENDPOINT, scope);
+    expect(url).toBe(`${ENDPOINT}#codemode=search_and_execute`);
+    expect(parseToolScope(url)).toEqual({
+      serverId: undefined, tools: undefined, codeMode: "search_and_execute",
+    });
   });
 });
 
@@ -164,6 +204,22 @@ describe("scopeAllows", () => {
   it("does not withhold a plain server's coincidentally named tool", () => {
     // The exclusion exists because portals can be re-toggled; a plain server cannot be.
     expect(scopeAllows({}, "portal_open", false)).toBe(true);
+  });
+
+  it("grants exactly the Code Mode pair on a code-mode scope", () => {
+    const scope = { codeMode: "search_and_execute" } as const;
+    expect(scopeAllows(scope, "portal_codemode_search", true)).toBe(true);
+    expect(scopeAllows(scope, "portal_codemode_execute", true)).toBe(true);
+    // Everything else, including the portal's own session tools -- which could widen what the
+    // sandbox reaches -- and every upstream name it might call from inside that sandbox.
+    for (const name of [
+      "portal_list_servers", "portal_toggle_servers", "gh_list_issues",
+      "portal_codemode_execute_extra", "portal_codemode",
+    ]) {
+      expect(scopeAllows(scope, name, true), name).toBe(false);
+    }
+    // A code-mode grant is only meaningful against a portal; the pair stays refused elsewhere.
+    expect(scopeAllows(scope, "portal_codemode_execute", false)).toBe(false);
   });
 });
 

@@ -45,10 +45,10 @@ it("tells an agent to return a pending action so its approval can appear in chat
     scope: { serverId: "jira" },
     findTool: async () => entry,
     stageAction: () => staged,
-    discardStagedAction() {},
+    discardStagedAction() { },
     actionKindFor: () => ({ tag: "jira:create", label: "Create issue" }),
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { submitAction() {} } as never);
+  const session = new McpSessionBase(host, { submitAction() { } } as never);
 
   const result = await session.callTool(entry.tool.name);
 
@@ -145,7 +145,7 @@ it("names the grant, not the server, when a scoped binding lacks the tool", asyn
     scope: { serverId: "jira" },
     findTool: async () => undefined,
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   await expect(session.listTools({ name: "gh_list_issues" })).resolves.toEqual([]);
   await expect(session.callTool("gh_list_issues"))
@@ -159,7 +159,7 @@ it("says the server has no such tool when the whole endpoint was granted", async
     scope: {},
     findTool: async () => undefined,
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   await expect(session.listTools({ name: "nope" })).resolves.toEqual([]);
 });
@@ -196,7 +196,7 @@ it("returns the same compact summary shape from a complete local catalog", async
       inputSchema: { type: "object" },
     }, "byo")],
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   const [summary] = await session.listTools({ search: "issues" });
 
@@ -213,7 +213,7 @@ it("refuses an empty or oversized query before calling the endpoint", async () =
     scope: {},
     searchTools,
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   await expect(session.listTools({ search: "   " })).rejects.toThrow(/non-empty query/);
   await expect(session.listTools({ search: " _ - " })).rejects.toThrow(/search terms/);
@@ -226,7 +226,7 @@ it("refuses an empty or oversized query before calling the endpoint", async () =
 
 it("refuses ambiguous progressive list options", async () => {
   const host = { serverName: "Jira", endpoint: "https://mcp.example.com", scope: {} } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   await expect(session.listTools({ name: "jira_search", search: "jira" } as never))
     .rejects.toThrow(/exactly one/);
@@ -242,7 +242,7 @@ it("treats optional selectors set to undefined as absent", async () => {
     searchTools: async () => [found],
     findTool: async () => found,
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   await expect(session.listTools({ search: "jira", name: undefined }))
     .resolves.toHaveLength(1);
@@ -258,7 +258,7 @@ it("refuses oversized tool names before consulting the host", async () => {
     scope: {},
     findTool: async () => { finds++; return undefined; },
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
   const oversized = "x".repeat(MAX_TOOL_NAME_CHARS + 1);
 
   await expect(session.listTools({ name: oversized })).rejects.toThrow(/tool name.*at most/i);
@@ -279,6 +279,7 @@ it("offers the sidecar link a tool declares for its results", async () => {
     endpoint: "https://mcp.example.com",
     scope: {},
     findTool: async () => classifyTool(tool, "byo"),
+    normalizeAppResourceUri: (uri: string) => uri,
     appLink: async (uri: string, call: AppCallSnapshot) => {
       minted.push(call);
       return `https://gadgets.example/app/${uri}`;
@@ -287,7 +288,7 @@ it("offers the sidecar link a tool declares for its results", async () => {
       callTool: async () => ({ content: [{ type: "text", text: "PROJ-1" }] }),
     } as never),
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   const result = await session.callTool("jira_search_issues", { query: "open" });
   expect(result).toMatchObject({
@@ -316,6 +317,38 @@ it("offers the sidecar link a tool declares for its results", async () => {
   // Wire shape, not this host's flattened vocabulary: a View parses the result with MCP's schema.
   expect(minted[0].result).not.toHaveProperty("status");
   expect(minted[0].result).not.toHaveProperty("text");
+});
+
+it("names a declared resource the way a renaming binding serves it", async () => {
+  // A portal answers a resource it fronts under `{serverId}_{uri}` and refuses the upstream's own
+  // name, so the declared `ui://` name is prefixed by the host before it becomes the link's identity.
+  const tool: McpTool = {
+    name: "jira_search_issues",
+    annotations: { readOnlyHint: true },
+    ui: { resourceUri: "ui://jira/search" },
+  };
+  const minted: string[] = [];
+  const host = {
+    serverName: "Portal",
+    endpoint: "https://mcp.example.com",
+    scope: {},
+    findTool: async () => classifyTool(tool, "byo"),
+    normalizeAppResourceUri: (uri: string) => `netsuite-sb1_${uri}`,
+    appLink: async (uri: string) => {
+      minted.push(uri);
+      return `https://gadgets.example/app/${uri}`;
+    },
+    call: async (fn: (client: never) => Promise<unknown>) => fn({
+      callTool: async () => ({ content: [{ type: "text", text: "ok" }] }),
+    } as never),
+  } as unknown as McpSessionHost;
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
+
+  const result = await session.callTool("jira_search_issues");
+
+  if (result.status !== "ok") throw new Error("expected an ok result");
+  expect(result.app?.uri).toBe("netsuite-sb1_ui://jira/search");
+  expect(minted).toEqual(["netsuite-sb1_ui://jira/search"]);
 });
 
 it("subscribes to an app link through the props the account resolves", async () => {
@@ -406,6 +439,40 @@ it("refuses a subscription to anything that is not a live link of this server", 
   expect(asked).toEqual([["a1".repeat(32), "c".repeat(64)]]);
 });
 
+it("accepts the link a connector mints under its own base path", async () => {
+  // Every real link is minted as `<baseUrl>/app/<account>/<token>`, and a connector's base URL
+  // ends in `/gatekeeper/<slug>`: a parse that assumed the link sat at the origin root refused
+  // every link the platform handed an agent, and told it the app.url it had just been given was
+  // not one.
+  const props: AppMessageHookProps = {
+    accountId: "4f".repeat(32),
+    token: "32".repeat(32),
+    uri: "netsuite-sb1_ui://SuiteApps/com.netsuite.mcpstandardtools/universal-selector/index.html",
+    serverName: "MCP Server Portal (mcp.fnbullion.com) / netsuite-sb1",
+  };
+  const asked: [string, string][] = [];
+  const bound: unknown[] = [];
+  const host = {
+    serverName: props.serverName,
+    endpoint: "https://mcp.fnbullion.com/mcp",
+    scope: {},
+    appMessageHookProps: async (accountId: string, token: string) => {
+      asked.push([accountId, token]);
+      return props;
+    },
+    appMessageHook: () => ({ enable: async () => { } }),
+  } as unknown as McpSessionHost;
+  const queue = { bindHook: async (...args: unknown[]) => { bound.push(args); } };
+  const session = new McpSessionBase(host, queue as never);
+
+  await session.subscribeAppMessages(
+    `http://localhost:8787/gatekeeper/mcp-portal/app/${props.accountId}/${props.token}`,
+    { receiveAppMessage: async () => { } } as never);
+
+  expect(asked).toEqual([[props.accountId, props.token]]);
+  expect(bound).toHaveLength(1);
+});
+
 it("mints a link for a result that names a ui:// resource itself", async () => {
   const host = {
     serverName: "Jira",
@@ -415,6 +482,7 @@ it("mints a link for a result that names a ui:// resource itself", async () => {
       name: "jira_report",
       annotations: { readOnlyHint: true },
     }, "byo"),
+    normalizeAppResourceUri: (uri: string) => uri,
     appLink: async (uri: string) => `https://gadgets.example/app/${uri}`,
     call: async (fn: (client: never) => Promise<unknown>) => fn({
       callTool: async () => ({
@@ -422,7 +490,7 @@ it("mints a link for a result that names a ui:// resource itself", async () => {
       }),
     } as never),
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   const result = await session.callTool("jira_report");
   if (result.status !== "ok") throw new Error("Expected a result.");
@@ -450,7 +518,7 @@ it("leaves the result untouched when no link can be minted", async () => {
       callTool: async () => ({ content: [{ type: "text", text: "PROJ-1" }] }),
     } as never),
   };
-  const queue = { authorizeObservation() {} } as never;
+  const queue = { authorizeObservation() { } } as never;
   const refusing = new McpSessionBase({
     ...base,
     appLink: async () => { throw new Error("the endpoint is unreachable"); },
@@ -484,7 +552,7 @@ it("offers no view for a result the tool reported as an error", async () => {
       callTool: async () => ({ content: [{ type: "text", text: "boom" }], isError: true }),
     } as never),
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   const result = await session.callTool("jira_search_issues");
   if (result.status !== "ok") throw new Error("Expected a result.");
@@ -520,7 +588,7 @@ it("offers the link for an approved action's stored result", async () => {
       return `https://gadgets.example/app/${uri}`;
     },
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   const result = await session.getActionResult(4);
   expect(result).toMatchObject({
@@ -569,7 +637,7 @@ it("offers the link for a result that named its own view", async () => {
     findTool: async () => classifyTool({ name: "get_mcp_app_demo" }, "byo"),
     appLink: async (uri: string) => `https://gadgets.example/app/${uri}`,
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   const result = await session.getActionResult(6);
   expect(result).toMatchObject({
@@ -606,7 +674,7 @@ it("states the subscription step in the result the agent decides on", async () =
       callTool: async () => ({ content: [{ type: "text", text: "PROJ-1" }] }),
     } as never),
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   const result = await session.callTool("jira_search_issues", {});
   if (result.status !== "ok") throw new Error("expected an ok result");
@@ -643,7 +711,7 @@ it("prefers the tool's declared view over the one its result named", async () =>
     }, "byo"),
     appLink: async (uri: string) => `https://gadgets.example/app/${uri}`,
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   await expect(session.getActionResult(7)).resolves.toMatchObject({
     app: { uri: "ui://jira/issue" },
@@ -669,7 +737,7 @@ it("returns an applied result even when the tool can no longer be read", async (
     findTool: async () => { throw new Error("the endpoint is unreachable"); },
     appLink: async () => "https://gadgets.example/app/ui://jira/issue",
   } as unknown as McpSessionHost;
-  const session = new McpSessionBase(host, { authorizeObservation() {} } as never);
+  const session = new McpSessionBase(host, { authorizeObservation() { } } as never);
 
   await expect(session.getActionResult(5)).resolves.toEqual({
     status: "ok",

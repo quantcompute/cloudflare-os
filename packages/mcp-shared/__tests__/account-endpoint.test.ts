@@ -258,7 +258,7 @@ describe("connect initiation nonce", () => {
     });
     await account.setMcpSessionId(
       old.endpoint, connection.generation, connection.sessionId, "old-session");
-    expect(context.storage.kv.get("mcpSessionId")).toBeUndefined();
+    expect(context.storage.kv.get("mcpSessions")).toBeUndefined();
 
     account.failProbe();
     await expect(repoint).rejects.toThrow("stop test probe");
@@ -279,7 +279,42 @@ describe("connect initiation nonce", () => {
     await expect(account.setMcpSessionId(
       connected.endpoint, second.generation, null, "second-session")).resolves.toBe(false);
 
-    expect(context.storage.kv.get("mcpSessionId")).toBe("first-session");
+    expect(context.storage.kv.get("mcpSessions")).toEqual({ "": "first-session" });
+  });
+
+  it("keeps each connection flavor's transport session separate", async () => {
+    // A portal answers a Code Mode request with a different tool set than the plain endpoint, so a
+    // session opened for one flavor is not one the other may reuse. The record keeps both, keyed by
+    // the mode, and each call reads and writes only its own entry.
+    const context = fakeContext();
+    const connected = { ...server("https://mcp.example/mcp"), auth: "none" as const };
+    context.storage.kv.put("server", connected);
+    const account = new InterleavingAccount(context as never, {});
+    const plain = await account.getConnection(connected.endpoint);
+    const codeMode = await account.getConnection(connected.endpoint, "search_and_execute");
+
+    // A connected account still has no session for either flavor until one is opened.
+    expect(plain.sessionId).toBeNull();
+    expect(codeMode.sessionId).toBeNull();
+
+    await expect(account.setMcpSessionId(
+      connected.endpoint, plain.generation, null, "plain-session")).resolves.toBe(true);
+    await expect(account.setMcpSessionId(
+      connected.endpoint, plain.generation, null, "codemode-session", "search_and_execute"))
+      .resolves.toBe(true);
+
+    expect(context.storage.kv.get("mcpSessions"))
+      .toEqual({ "": "plain-session", search_and_execute: "codemode-session" });
+    await expect(account.getConnection(connected.endpoint)).resolves
+      .toMatchObject({ sessionId: "plain-session" });
+    await expect(account.getConnection(connected.endpoint, "search_and_execute")).resolves
+      .toMatchObject({ sessionId: "codemode-session" });
+
+    // Clearing a dead session clears one flavor, not the record: the other flavor's calls still
+    // skip their own handshake.
+    await account.setMcpSessionId(
+      connected.endpoint, plain.generation, "codemode-session", null, "search_and_execute");
+    expect(context.storage.kv.get("mcpSessions")).toEqual({ "": "plain-session" });
   });
 
   it("does not let an old in-flight refresh restore tokens after repoint", async () => {
@@ -497,7 +532,8 @@ describe("connect initiation nonce", () => {
     expect(await resumed.acceptAuthCode("authorization-code", oauthNonce)).toEqual(HANDOFF);
     expect(context.storage.kv.get<{ access_token: string }>("tokens")?.access_token)
       .toBe("access-token");
-    expect(context.storage.kv.get("mcpSessionId")).toBe("session-for-access-token");
+    expect(context.storage.kv.get("mcpSessions"))
+      .toEqual({ "": "session-for-access-token" });
     expect(complete).toHaveBeenCalledOnce();
     expect(await resumed.acceptAuthCode("authorization-code", oauthNonce)).toBeNull();
   });
@@ -512,7 +548,7 @@ describe("connect initiation nonce", () => {
     context.storage.kv.put("server", server("https://mcp.example/mcp"));
     context.storage.kv.put("callback", { complete, reconnectComplete });
     context.storage.kv.put("tokens", { access_token: "old-token", token_type: "Bearer", expiresAt: 1 });
-    context.storage.kv.put("mcpSessionId", "old-session");
+    context.storage.kv.put("mcpSessions", { "": "old-session" });
     const account = new OAuthFlowAccount(context as never, {});
     const nonce = "7".repeat(64);
     await account.prepareReconnect(nonce);
@@ -529,7 +565,7 @@ describe("connect initiation nonce", () => {
       .toBe("old-token");
     // The session the probe opened with the new tokens is staged with them: bound facets still
     // read the old tokens, and a session opened under other credentials is not theirs to use.
-    expect(context.storage.kv.get("mcpSessionId")).toBe("old-session");
+    expect(context.storage.kv.get("mcpSessions")).toEqual({ "": "old-session" });
     expect(context.storage.kv.get("reconnectTokens")).toBeUndefined();
     // The Workshop was told which stage this completion produced, and only that id commits it.
     const stageId = reconnectComplete.mock.calls[0][0];
@@ -542,7 +578,8 @@ describe("connect initiation nonce", () => {
     await account.commitReconnect(stageId);
     expect(context.storage.kv.get<{ access_token: string }>("tokens")?.access_token)
       .toBe("access-token");
-    expect(context.storage.kv.get("mcpSessionId")).toBe("session-for-access-token");
+    expect(context.storage.kv.get("mcpSessions"))
+      .toEqual({ "": "session-for-access-token" });
     expect(context.storage.kv.get("stagedCredentials")).toBeUndefined();
     await expect(account.commitReconnect(stageId)).rejects.toThrow(/No reconnect is awaiting/);
   });
@@ -766,7 +803,7 @@ describe("connect initiation nonce", () => {
     await expect(account.commitReconnect(stageIdA)).rejects.toThrow(/No reconnect is awaiting/);
     expect(context.storage.kv.get("server")).toEqual(newServer);
     expect(context.storage.kv.get("tokens")).toBeUndefined();
-    expect(context.storage.kv.get("mcpSessionId")).toBeUndefined();
+    expect(context.storage.kv.get("mcpSessions")).toBeUndefined();
 
     account.failProbe();
     await expect(repoint).rejects.toThrow("stop test probe");
@@ -846,7 +883,7 @@ describe("connect initiation nonce", () => {
     expect(context.storage.kv.get<ConnectedServer>("server")?.auth).toBe("oauth");
     await account.commitReconnect(reconnectComplete.mock.calls[0][0]);
     expect(context.storage.kv.get<ConnectedServer>("server")?.auth).toBe("none");
-    expect(context.storage.kv.get("mcpSessionId")).toBe("public-session");
+    expect(context.storage.kv.get("mcpSessions")).toEqual({ "": "public-session" });
   });
 
   it("revokes the retired OAuth grant when a reconnect observes a server that takes none", async () => {

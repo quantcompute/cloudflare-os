@@ -235,3 +235,49 @@ it("gives a retried listing a fresh discovery budget after session recovery", as
   expect(initialPages).toBe(50);
   expect(retryPages).toBe(2);
 });
+
+it("connects a Code Mode grant with the mode on the request URL and its own session", async () => {
+  // The mode is a property of the request rather than of the account: the account is asked about the
+  // plain endpoint and this flavor, while every request carries the query parameter that makes the
+  // portal answer with its Code Mode pair instead of the upstream catalog.
+  const flavors: Array<string | undefined> = [];
+  const writes: Array<{ codeMode?: string; previous: string | null; sessionId: string | null }> = [];
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+    urls.push(String(_input));
+    const request = JSON.parse(String(init?.body));
+    if (request.method === "initialize") {
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }), {
+        headers: { "Content-Type": "application/json", "Mcp-Session-Id": "codemode-session" },
+      });
+    }
+    return new Response(null, { status: 202 });
+  });
+  const account: ConnectionAccount = {
+    async getConnection(_endpoint, codeMode) {
+      flavors.push(codeMode);
+      return { authorization: "token", sessionId: null, generation: 1 };
+    },
+    async assertConnectionCurrent() {},
+    async setMcpSessionId(_endpoint, _generation, previous, sessionId, codeMode) {
+      writes.push({ codeMode, previous, sessionId });
+      return true;
+    },
+    async noteCredentialsExpired() {},
+  };
+
+  await expect(withClient({}, account, "https://portal.example.com/mcp", async () => "done", {
+    codeMode: "search_and_execute",
+  })).resolves.toBe("done");
+
+  expect(flavors).toEqual(["search_and_execute"]);
+  // Every request -- the handshake, its notification, and anything after -- carries the mode.
+  expect(urls.filter(url => url !== "https://portal.example.com/mcp?codemode=search_and_execute"))
+    .toEqual([]);
+  expect(urls.length).toBeGreaterThan(0);
+  // Attributed to the flavor, or the next plain call would adopt this session and skip its own
+  // handshake against a listing that has nothing to do with this one.
+  expect(writes).toEqual([
+    { codeMode: "search_and_execute", previous: null, sessionId: "codemode-session" },
+  ]);
+});

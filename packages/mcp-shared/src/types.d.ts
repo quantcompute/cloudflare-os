@@ -33,16 +33,20 @@ export type McpCallResult =
       isError?: boolean;
       /**
        * Present when this result has an interactive view. **Before you relay `url` to the user you
-       * MUST call `subscribeAppMessages(url, self)` in this same turn.** Until the link is
-       * subscribed the view cannot send anything back into this conversation: a person who opens a
-       * link that was never subscribed can pick a prompt and have nothing arrive, and nothing tells
-       * them why. Opening `url` renders the same result in a sidecar window, with live access to
-       * this server's read-only tools.
+       * MUST call `subscribeAppMessages(url, self)` in this same turn, passing `url` exactly as it
+       * appears here -- it is the only value that call accepts, and a link you shorten, re-host or
+       * replace with `uri` is refused.** Until the link is subscribed the view cannot send anything
+       * back into this conversation: a person who opens a link that was never subscribed can pick a
+       * prompt and have nothing arrive, and nothing tells them why. Opening `url` renders the same
+       * result in a sidecar window, with live access to this server's read-only tools.
        */
       app?: {
         /** The `ui://` resource that renders this result. */
         uri: string;
-        /** Link to open. Single-use-free and reusable while the account stays connected. */
+        /**
+         * Link to open, and the exact string `subscribeAppMessages` takes: pass it as written.
+         * Single-use-free and reusable while the account stays connected.
+         */
         url: string;
         /** Display name for the link, when the server gave one. */
         title?: string;

@@ -7,6 +7,11 @@ import type {
   McpServerConfiguratorValues,
 } from "./server-configurator-types";
 
+// The one `#codemode=` value this connector grants, in step with `PORTAL_CODEMODE_MODES` in
+// `@gadgets/mcp-shared/portal`. Duplicated because this module is transpiled on its own and the
+// sandbox gives it no repository imports beyond the configurator primitives.
+const CODE_MODE = "search_and_execute";
+
 let pendingServers: Promise<ConfiguratorUIOption[]> | null = null;
 let loadedServers: ConfiguratorUIOption[] | null = null;
 
@@ -31,7 +36,7 @@ async function loadServerOptions(
 }
 
 export default {
-  initial: { server: null, mode: "all", tools: null, endpointKind: "unknown" },
+  initial: { server: null, mode: "all", tools: null, codeMode: null, endpointKind: "unknown" },
 
   async initialValuesFromResourceUrl({ resourceUrl, ui }) {
     const params = new URLSearchParams(new URL(resourceUrl).hash.slice(1));
@@ -46,19 +51,27 @@ export default {
       server,
       mode: params.has("tool") ? "choose" : "all",
       tools: server && selected.length > 0 ? selected.join(",") : null,
+      // The fragment decides which half of the form opens, since a Code Mode grant carries no
+      // server. An unrecognized mode stays on the server side: the mint refuses it, and the person
+      // can still repair the resource URL with an ordinary grant.
+      codeMode: params.get("codemode")?.trim() === CODE_MODE ? CODE_MODE : null,
       endpointKind: servers.length > 0 ? "portal" : "empty",
     };
   },
 
   isReady({ values }) {
-    if (values.endpointKind !== "portal" || !values.server) return false;
+    if (values.endpointKind !== "portal") return false;
+    // Code Mode asks for no server and no tools; that it is portal-wide is the grant.
+    if (values.codeMode === CODE_MODE) return true;
+    if (!values.server) return false;
     return values.mode === "all"
       || (values.tools ?? "").split(",").some(name => name.trim().length > 0);
   },
 
   async resourceUrl({ values, ui }) {
-    if (!values.server) throw new Error("Choose a server behind this portal before adding it.");
     const endpoint = await ui.getEndpoint();
+    if (values.codeMode === CODE_MODE) return `${endpoint}#codemode=${CODE_MODE}`;
+    if (!values.server) throw new Error("Choose a server behind this portal before adding it.");
     const params = new URLSearchParams({ server: values.server });
     if (values.mode !== "all") {
       const selected = (values.tools ?? "").split(",").map(name => name.trim()).filter(Boolean)
@@ -112,6 +125,7 @@ export default {
       </Section>;
     }
 
+    const codeMode = values.codeMode === CODE_MODE;
     const soleServer = loadedServers?.length === 1 ? loadedServers[0] : null;
     const mode = values.mode === "choose" ? "choose" : "all";
     const toolsReady = Boolean(values.server);
@@ -119,7 +133,42 @@ export default {
     const selectedCount = (values.tools ?? "").split(",").filter(Boolean).length;
 
     return <Section>
-      {(!soleServer || !values.server) && <Field
+      <Field
+        label="Grant"
+        description={
+          "One server behind the portal, or the portal's Code Mode tools. Code Mode reaches " +
+          "every server the portal enables; it cannot be narrowed to one."
+        }
+      >
+        <RadioCards
+          value={codeMode ? "codemode" : "server"}
+          options={[
+            {
+              value: "server",
+              title: "Server",
+              description: "One server behind this portal, with all or some of its tools.",
+            },
+            {
+              value: "codemode",
+              title: "Code Mode",
+              description:
+                "Search and run code in the portal's sandbox, reaching any upstream tool.",
+            },
+          ]}
+          onChange={kind => setValues({ codeMode: kind === "codemode" ? CODE_MODE : null })}
+        />
+      </Field>
+
+      {codeMode && <Field
+        label="Code Mode"
+        description={
+          "The portal runs the code in its own sandbox, so this connection can call any tool of " +
+          "any server behind the portal, including servers added later. Searching tool " +
+          "definitions runs straight away; running code waits for your approval."
+        }
+      />}
+
+      {!codeMode && (!soleServer || !values.server) && <Field
         label="Server"
         description="Which server behind this portal to grant. Its tools appear next."
       >
@@ -133,7 +182,7 @@ export default {
         />
       </Field>}
 
-      {toolsReady && <Field
+      {!codeMode && toolsReady && <Field
         label={soleServer ? `Tools · ${soleServer.title}` : "Tools"}
         description="Choose how much of this server this connection may call."
       >
@@ -157,7 +206,7 @@ export default {
         />
       </Field>}
 
-      {toolsReady && <Field
+      {!codeMode && toolsReady && <Field
         label="Allowed tools"
         description={mode === "all"
           ? "Read-only tools return data straight away; the rest queue for your approval."

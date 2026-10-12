@@ -233,6 +233,32 @@ it("does not hydrate portal-native tools from a portal's incomplete catalog", as
   expect(subject.remoteCalls).toBe(0);
 });
 
+it("refuses every name but the Code Mode pair on a code-mode binding", async () => {
+  const subject = facet({ codeMode: "search_and_execute" });
+  subject.catalogResult = Promise.resolve({
+    isPortal: true,
+    truncated: false,
+    tools: [
+      classifyTool({ name: "portal_codemode_search" }, "byo", true),
+      classifyTool({ name: "portal_codemode_execute" }, "byo", true),
+    ],
+  });
+
+  // Names outside the pair are refused before the catalog is read, so a code-mode grant cannot
+  // reach the portal's own session tools or any upstream server's tools -- which the sandbox behind
+  // it can, but only as calls the agent approved of the pair itself.
+  await expect(subject.findTool("portal_toggle_servers")).resolves.toBeUndefined();
+  await expect(subject.findTool("gh_list_issues")).resolves.toBeUndefined();
+  await expect(subject.findTool("portal_codemode_execute2")).resolves.toBeUndefined();
+  expect(subject.catalogReads).toBe(0);
+  expect(subject.remoteCalls).toBe(0);
+
+  await expect(subject.findTool("portal_codemode_search")).resolves
+    .toMatchObject({ tool: { name: "portal_codemode_search" }, mode: "read" });
+  await expect(subject.findTool("portal_codemode_execute")).resolves
+    .toMatchObject({ tool: { name: "portal_codemode_execute" }, mode: "action" });
+});
+
 it("bounds concurrent discovery work across distinct requests", async () => {
   const subject = facet();
   let active = 0;

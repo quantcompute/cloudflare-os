@@ -6,7 +6,7 @@ gatekeepers. Not a Worker: a library both of them import.
 | Package | Endpoint comes from | Grant is scoped to |
 | --- | --- | --- |
 | [`gatekeeper-mcp`](../gatekeeper-mcp/README.md) | a user pastes a URL | the whole server, or named tools |
-| [`gatekeeper-mcp-portal`](../gatekeeper-mcp-portal/README.md) | a deployment var, `MCP_PORTAL_URL` | one upstream server behind the portal, or named tools |
+| [`gatekeeper-mcp-portal`](../gatekeeper-mcp-portal/README.md) | a deployment var, `MCP_PORTAL_URL` | one upstream server behind the portal, named tools, or the portal's Code Mode sandbox |
 
 Code lives here when two copies of it would eventually disagree and the disagreement would be a
 security bug: tool classification, the scope grammar, the OAuth lifecycle, the approval-queue
@@ -24,14 +24,14 @@ does so through a named hook (`staticToken`, `mintAccount`), not a private copy.
 | `schema-to-ts` | JSON Schema to TypeScript, strict `callTool` overloads plus progressive discovery |
 | `session-methods` | Installs those methods at runtime, so the generated types are not a fiction |
 | `tool-search` | The one query matcher every catalog search uses, so a query cannot mean two things |
-| `portal` | Gateway detection, tool-name to upstream-server mapping, server listing |
-| `scope` | The resource-URL scope grammar, and the check every call passes through |
+| `portal` | Gateway detection, tool-name to upstream-server mapping, server listing, the Code Mode query parameter and its two tool names |
+| `scope` | The resource-URL scope grammar, including the Code Mode fragment, and the check every call passes through |
 | `endpoint` | Validation and host blocklist for a user-supplied endpoint |
 | `fetch` | Every outbound request; redirects are followed by hand and each hop re-checked, including SDK OAuth fetches |
-| `account` | Durable Object base and persisted SDK OAuth state: connect, refresh, revocation |
+| `account` | Durable Object base and persisted SDK OAuth state: connect, refresh, revocation; transport sessions per connection flavor |
 | `facet` | Common session, catalog, action, and sharing behavior for connector-owned Durable Object facets |
 | `catalog` | One binding's tool list: fetched, cached, scoped to the grant, classified; plus the cache for tools hydrated past that list |
-| `connection` | `withClient` — transport sessions, retries, credential-expiry reporting |
+| `connection` | `withClient` — transport sessions, one per connection flavor, plus retries and credential-expiry reporting |
 | `action-store` | Staged to applied/rejected/failed, with a bound on what is retained and a claim so one approval is never sent twice |
 | `session` | The Gadget-facing capability, and the one path every tool call takes |
 | `apps` | The MCP Apps boundary: `ui://` recognition, tool visibility, View CSP and permissions, bounded results |
@@ -49,6 +49,26 @@ does so through a named hook (`staticToken`, `mintAccount`), not a private copy.
 | `types.d.ts` | Base types prepended to every generated per-server `.d.ts` |
 
 Nothing outside `tools.ts` reads a tool's `annotations`.
+
+## Scope grammar
+
+The fragment of a resource URL is the grant, and the only place a grant's breadth is expressed:
+
+| Fragment | Reaches |
+| --- | --- |
+| *(none)* | every tool the endpoint offers, now and later |
+| `#server=<id>` | every tool of one portal upstream server |
+| `#tool=<name>` (repeatable) | only those exact tools |
+| `#codemode=<mode>` | the portal's Code Mode sandbox, a whole-portal breadth |
+
+`#codemode=search_and_execute` is the one supported mode, and it stands alone: `formatToolScope`
+emits `codemode=<mode>` and nothing else when it is set, `isWholeEndpoint` is false for such a scope,
+and an unrecognized mode throws rather than failing open — an unknown value is not a narrower grant.
+`scopeAllows` admits exactly `portal_codemode_search` and `portal_codemode_execute`, so every other
+name is refused, portal-native or upstream. The fragment is narrow at the tool boundary precisely
+because it cannot be narrow anywhere else: `portal_codemode_execute` runs JavaScript on the portal
+and may call any upstream tool the portal enables, so a code-mode scope names no server and no tool
+to pin that down.
 
 ## Trust tiers
 
@@ -75,6 +95,11 @@ Annotations are optional in MCP and most servers publish none. Every hint is com
 `=== true` or `=== false`, so an unannotated tool is an action, needs approval, and can never
 auto-apply, on either tier. That matches the spec's own defaults (`readOnlyHint: false`,
 `destructiveHint: true`, `idempotentHint: false`).
+
+Code Mode sits outside the tiers, because there is no server annotation to weigh. The connector
+classifies `portal_codemode_search` as a read and `portal_codemode_execute` as an action, and neither
+can auto-apply on any tier: `execute` runs JavaScript on the portal that may call tools no catalog
+ever described, so there is nothing a trust setting could safely make automatic.
 
 Neither tier can be shared. A Gadget bound to any MCP endpoint is owner-only, for reasons unrelated
 to provenance — see [`sharing-policy.ts`](src/sharing-policy.ts).
@@ -141,7 +166,10 @@ app may call a tool only if this binding classified it `mode: "read"`, only if t
 grant the binding already holds, and only if the tool's own visibility admits apps; it may read
 `ui://` resources and no others. Opening a link is the page's, not the endpoint's, and the page
 passes `http(s)` to the browser and nothing else. Anything else is refused with `-32001` and a
-sentence telling the user to ask the agent in the chat.
+sentence telling the user to ask the agent in the chat. Every request a View makes is recorded — the
+tool it called or the resource it read, the outcome, and, for a read, how many items came back —
+through the logger the host supplies (`AppGatewayHost.log`), because a window's own requests are the
+one app surface no other log line covers.
 
 One request is delivered rather than refused: `ui/message`, which asks the Host to put a text message
 into the conversation that opened the link. Nothing in a link says which conversation opened it, so
@@ -170,12 +198,39 @@ subscribed to is told so in one sentence (`APP_MESSAGE_NOT_SUBSCRIBED`) that nam
 agent in the chat to subscribe. A registration does not outlive its link — a superseded token and an
 expired one both take it with them — so a link that cannot deliver cannot be messaged.
 
-An endpoint that renames its resources — a portal fronts an upstream's `ui://demo/dashboard` as
-`mcp-app-server_ui://demo/dashboard` and refuses the upstream's own URI — is what
-`AppBinding.resourceUriPrefix` is for. The link keeps the URI its server declared, which is the
-app's identity and the name its window asks for; `appResourceUri` adds the prefix only on the way
-out, for the page's read and for the window's `resources/read` alike. A mint that finds a live link
-whose stored binding names resources differently replaces it, since that link can read nothing.
+The URI a tool or a result carries in `_meta.ui.resourceUri` is the resource's own `ui://` name. A
+binding's endpoint may serve that same resource under a different name — a portal serves an upstream's
+`ui://demo/dashboard` as `mcp-app-server_ui://demo/dashboard` and refuses the upstream's own — so the
+host names it the way the endpoint serves it before it becomes a link's identity and the name its
+window asks for. `McpFacetBase.normalizeAppResourceUri` applies `AppBinding.resourceUriPrefix` once,
+idempotently (so a result that already carries the endpoint's name is left alone), and is the identity
+for a binding that declares no prefix. `canonicalAppUri` then drops the routing parameters this
+deployment owns (`APP_HOST_OWNED_URI_PARAMS`, today `server_id`), which a portal appends to the URIs it
+advertises and which every endpoint this is built against refuses when a read carries one. The stored
+name is therefore one the endpoint answers and that carries no host-owned parameter.
+
+A resource is read under exactly one name: the resource's own `ui://` name for an endpoint that serves
+it as declared, or the binding's prefixed name, `{prefix}{uri}` (see `AppBinding.resourceUriPrefix`),
+for one that renames what it fronts. A portal answers a resource it fronts under its namespaced name
+and refuses the URI the upstream declared with `-32602 Resource not found` — production logs and the
+portal's own `resources/list` both show it — so when a prefix is declared the unprefixed name is not a
+second chance, it is a request the endpoint has already said it will not serve, and `appResourceNames`
+does not make it. A name is taken only when its read yields an app document, not merely any contents,
+so a result the host cannot render is not mistaken for one it can. `appResourceName` on the view lines
+records the name a read used.
+
+A read that yields no document is not silent about why. It logs the reply's byte length
+(`appResponseBytes`) and what the call returned — each item's URI and media type (`appContentUris`),
+and, when none of them was a document, each item's URI, media type and body size (`appContentItems`),
+the body itself never reaching a log line — and then asks the endpoint once, with a bounded
+`resources/list`, what it does publish: `app.resource.list` carries `appResourceCount` and
+`appResourceNames`, beside the full URI the read passed. So a link that will not open names what it
+asked for, the size of the answer, and what was on offer, and a tiny empty answer is told apart from a
+large one the host could not use. A listing that itself fails is logged and changes nothing the caller
+already holds.
+
+A mint that finds a live link whose stored binding names resources differently replaces it, since
+that link can read nothing.
 
 That rule is the whole design, not a setting. A sidecar window has no approval queue, and the
 conversation behind its link — when there is one — receives only messages the person explicitly
@@ -252,7 +307,6 @@ Fixed rather than configurable.
 | Connect link | 10 min | `connect-nonce.ts` | Single-use, and consumed on success |
 | Unfinished connect | 1 hour | `connect-nonce.ts` | After which a half-built account deletes itself |
 | App link (`APP_TOKEN_LIFETIME_MS`) | 24 hours | `app-tokens.ts` | Long enough to open a result from the conversation it appeared in, short enough that an old link stops working |
-| App document (`MAX_APP_HTML_BYTES`) | 512 KiB | `apps.ts` | One page render; a server shipping more than this is shipping an application, not a view |
 | App tool result (`MAX_APP_RESULT_BYTES`) | 64 KiB | `apps.ts` | What one View is handed per call; the agent's own copy of the same result is not bounded by this |
 | Stored app call snapshot | 128 KiB | `app-tokens.ts` | The Durable Object's per-value limit, so a mint that would exceed it keeps the link and drops the result instead of failing |
 | App JSON-RPC message | 64 KiB | `app-http.ts` | A `tools/call` with its arguments, not an upload: the data travels back in the reply |

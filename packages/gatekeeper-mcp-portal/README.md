@@ -9,24 +9,32 @@ The intended deployment is a
 [Cloudflare MCP server portal](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/):
 Access decides who may connect, Cloudflare Gateway logs and inspects what crosses, and this
 connector turns what is behind it into typed capabilities that Gadgets can grant one server at a
-time.
+time, or reach as a whole through the portal's own Code Mode sandbox.
 
 For endpoints a user supplies themselves, use [`gatekeeper-mcp`](../gatekeeper-mcp/README.md).
 
 ## What it provides
 
-One resource type, **MCP portal server**, at two grant breadths. A grant always names one upstream
-server; "everything the portal offers" is not offered, since it would hand a Gadget every tool of
-every system the organization has connected in one click.
+One resource type, **MCP portal server**, at three grant breadths. A **server** or **named-tools**
+grant names one upstream server; a **Code Mode** grant hands the Gadget the portal's own Code Mode
+sandbox instead. "Everything the portal offers" as a bare-endpoint server grant is still not
+offered, since it would hand a Gadget every tool of every system the organization has connected in
+one click.
 
 | Granularity | Resource URL | Session type |
 | --- | --- | --- |
 | **Server** — every tool of one upstream server, including ones it adds later | `<endpoint>#server=github` | `Mcp<Name><tag>Session` |
 | **Named tools** — only the listed tools of that server | `<endpoint>#server=github&tool=github_a&tool=github_b` | `Mcp<Name><tag>Session` |
+| **Code Mode** — the portal's two Code Mode tools, whose sandbox reaches every upstream tool the portal enables | `<endpoint>#codemode=search_and_execute` | `Mcp<Name><tag>Session` |
 
 `<tag>` is four hex characters derived from the resource URL. It matters most here: two grants
 pinning different tools of one upstream server share both the name and the endpoint, so the scope is
 the only thing that distinguishes them.
+
+A **Code Mode** grant is the one breadth that is *not* server-scoped, and cannot be made so. The
+sandbox runs on the portal, so its `portal_codemode_execute` can call every upstream tool the portal
+currently enables; the fragment asks the portal for Code Mode and nothing narrower. See
+[Granting](#granting).
 
 The session API — a typed method per described tool, plus `callTool`, `getActionResult`, and
 `listTools` with progressive search/name options — is the same as
@@ -53,12 +61,21 @@ within the explicit scan limits above; exceeding a limit fails rather than prete
 | `MCP_PORTAL_AUTH` | `oauth` (default), `none`, or `token`. |
 | `MCP_PORTAL_TOKEN` | Secret bearer token, for `MCP_PORTAL_AUTH: "token"`. |
 | `MCP_PORTAL_TRUST_ANNOTATIONS` | `true` to let upstream tool annotations drive auto-approval. Off by default; see below. |
-| `MCP_PORTAL_HIDDEN_SERVER_IDS` | Comma-separated upstream server IDs to hide from the configurator and refuse at the grant boundary. |
+| `MCP_PORTAL_HIDDEN_SERVER_IDS` | Comma-separated upstream server IDs to hide from the configurator and refuse at the grant boundary of a **server** grant. |
 | `MCP_ALLOW_INSECURE` | `"true"` to disable the endpoint checks entirely: permits `http://` **and** private, loopback, link-local, and cloud-metadata hosts, for the portal and every OAuth URL discovered from it. Local dev only. |
 
-The portal must expose upstream tools directly. Use a portal where Code Mode is off or opt-in, or
-append `?codemode=off` when its policy is default-on. Enforced Code Mode is unsupported. Do not add
-an `optimize_context` parameter or opt in to Code Mode on `MCP_PORTAL_URL`.
+A **server** or **named-tools** grant needs the portal to expose upstream tools directly. Use a
+portal where Code Mode is off or opt-in, or append `?codemode=off` when its policy is default-on;
+a portal that *enforces* Code Mode leaves no upstream tools to scope, so it offers nothing to a
+server grant. `MCP_PORTAL_URL` is used exactly as configured and never carries a code-mode query
+parameter.
+
+A **Code Mode** grant is the connector's own use of that feature rather than a property of the
+configured endpoint: the grant connects to the portal with `?codemode=search_and_execute`, which is
+what its resource URL records. The connector assumes the portal's `code_mode` policy is `opt_in`
+(or `default_on`) and never detects it — the policy is not discoverable over MCP — so where Code Mode
+is off the two sandbox tools never appear and the grant fails at validation with a message naming the
+portal's Code Mode policy, rather than silently behaving differently.
 
 Only `MCP_ALLOW_INSECURE` is set in the repo's `cloudflare.config.ts`, pinned to `"false"` so the default
 is explicit rather than merely absent. None of the others is, and a portal URL committed there would
@@ -120,8 +137,18 @@ itself over `MCP_PORTAL_NAME` in every approval prompt.
 
 ## Granting
 
-The configurator asks which server behind the portal, how broad the grant is, and — if it is
-pinned — which tools:
+The configurator first asks what kind of grant this is — one server behind the portal, or the
+portal's Code Mode sandbox:
+
+```
+Grant type · How this Gadget should reach the portal.
+(•) Server behind the portal   Grant one upstream server, or a subset of its tools.
+( ) Code Mode                  Hand the Gadget the portal's search-and-execute sandbox instead.
+```
+
+Choosing **Code Mode** hides the server and tool questions and emits
+`<endpoint>#codemode=search_and_execute`, which is the whole grant. Otherwise it asks which server
+behind the portal, how broad the grant is, and — if it is pinned — which tools:
 
 ```
 Server · Which server behind this portal to grant. Its tools appear next.
@@ -143,13 +170,20 @@ box is ticked, since the two look identical and diverge as soon as the server pu
 tool. A portal with one server behind it collapses to the tool questions alone, because the choice
 is made for the user rather than skipped — the grant still records that server.
 
-Every grant here names exactly one upstream server. There is no breadth that spans the portal, so a
-configured endpoint with no upstream servers — a plain MCP server, or a portal that currently fronts
-nothing — is **not grantable through this connector**: the configurator has no server to offer and
-the form stays unsubmittable. That is deliberate. The alternative is a grant recorded against the
-bare endpoint, which would silently include every server added to it later. Point a plain MCP
-endpoint at the **MCP** connector (`gatekeeper-mcp`) instead, which is built for exactly that and
-offers endpoint-wide and per-tool grants.
+A **server** grant always names exactly one upstream server; there is no server-grant breadth that
+spans the portal. A configured endpoint with no upstream servers — a plain MCP server, or a portal
+that currently fronts nothing — therefore has no server grant to offer. Point a plain MCP endpoint
+at the **MCP** connector (`gatekeeper-mcp`) instead, which is built for exactly that and offers
+endpoint-wide and per-tool grants.
+
+**Code Mode** is the deliberate exception, and the only grant here that reaches the whole portal. It
+hands the Gadget the portal's own sandbox, whose `portal_codemode_execute` can call any upstream tool
+the portal enables, including servers and tools added later. That breadth cannot be narrowed: the
+sandbox runs on the portal, so no `#server=` or `#tool=` scope could confine it, and the connector
+does not pretend otherwise. It also is not a bare-endpoint grant of the portal's direct tools — it
+exposes exactly the two Code Mode tools and nothing else. `MCP_PORTAL_HIDDEN_SERVER_IDS` cannot
+constrain it: that setting filters the server picker and refuses a server grant, and a Code Mode
+grant has no server to filter or refuse.
 
 ## How upstream servers are recovered
 
@@ -159,17 +193,20 @@ recovered from two facts in the portal's documented contract:
 1. Every tool is named `{server_id}_{original_name}`, split on the first underscore only, and an
    alias replaces the tool name but never the server-id prefix. Membership is therefore a pure
    string test needing no network call, so a server scope cannot fail open on a transient error.
-2. `portal_list_servers` is available in every portal session and returns each upstream server's id,
-   name, and enabled state.
+2. `portal_list_servers` is available in every portal session that is not in Code Mode, and returns
+   each upstream server's id, name, and enabled state. A Code Mode session exposes only the two
+   `portal_codemode_*` tools, so a code-mode grant is recognised from its scope fragment rather than
+   from a server listing.
 
-Detection is a capability probe — does the endpoint offer `portal_list_servers`? — not a hostname
-match, so it works for a custom portal hostname and for any other aggregator adopting the
-convention. A *truncated* listing counts as a portal whether or not the probe tool is in it:
-`tools/list` is unordered, so concluding "not a portal" because the evidence fell past the cut would
-fail open on the `portal_*` exclusion below. Truncation is reported by the client rather than
-inferred from the tool count, because either cap can stop a listing — the count the caller asked for,
-or the 96 KiB UTF-8 budget, and the latter can cut a listing of verbose tools short while leaving an
-array that looks complete. The byte budget leaves 32 KiB below Durable Object's per-value limit for
+Detection of a **server** grant is a capability probe — does the endpoint offer
+`portal_list_servers`? — not a hostname match, so it works for a custom portal hostname and for any
+other aggregator adopting the convention. A *truncated* listing counts as a portal whether or not the
+probe tool is in it: `tools/list` is unordered, so concluding "not a portal" because the evidence
+fell past the cut would fail open on the `portal_*` exclusion below. Truncation is reported by the
+client rather than inferred from the tool count, because either cap can stop a listing — the count
+the caller asked for, or the 96 KiB UTF-8 budget, and the latter can cut a listing of verbose tools
+short while leaving an array that looks complete. The byte budget leaves 32 KiB below Durable
+Object's per-value limit for
 the cache wrapper and serialization overhead; if storage nevertheless rejects the cache value, the
 fresh catalog is still used for that operation rather than turning a cache miss into a failure.
 
@@ -199,9 +236,13 @@ while building a form, so it does not pass through the approval queue. Failing t
 at all is different, and blocks the grant rather than falling back to the bare endpoint — the
 configurator reports it and stays unsubmittable.
 
-`portal_*` tools are excluded from every grant at every scope. `portal_toggle_servers` and friends
-change which upstream servers the session can reach, so granting one would let a Gadget widen its
-own authority. This is a capability-boundary rule, not a policy preference, and is not configurable.
+`portal_*` tools are excluded from every server grant at every scope: `portal_toggle_servers` and
+friends change which upstream servers the session can reach, so granting one would let a Gadget widen
+its own authority. This is a capability-boundary rule, not a policy preference, and is not
+configurable. A **Code Mode** grant is the deliberate exception and does not go through that
+exclusion: its scope admits exactly `portal_codemode_search` and `portal_codemode_execute`, and
+refuses every other portal-native tool and every upstream tool alike. The authority the sandbox
+behind `execute` wields is the portal's own, not something this connector grants tool-by-tool.
 
 ## Approvals and sharing
 
@@ -212,6 +253,12 @@ and any one of them could self-declare both and get writes that skip the approva
 tier is `byo` unless a deployment sets `MCP_PORTAL_TRUST_ANNOTATIONS=true`. That flag is the
 "trusted server" assertion MCP's guidance asks for, and it has to be about the upstreams themselves,
 not just the portal in front of them.
+
+A **Code Mode** grant is outside the tier entirely. Its two tools are classified by this connector
+rather than by any server's annotations: `portal_codemode_search` is a read and
+`portal_codemode_execute` is an action, on either tier, and neither can be auto-approved. The
+sandbox behind `execute` can call any upstream tool the portal enables — including ones no catalog
+ever described — so no annotation and no trust setting could make spending it automatic.
 
 `addObserver` refuses everyone, as it does for user-supplied endpoints. Reaching the portal is not
 the same as being allowed to see a particular tool result, and the Gadget runs on the owner's
@@ -236,12 +283,32 @@ page deliver the app's text into that conversation. The upstream server's name i
 description shows, so a reader of the Connections list sees which server behind the portal asked.
 
 The portal **renames the resources it fronts**, exactly as it namespaces tools and prompts: it lists
-and reads an upstream's `ui://demo/dashboard` as `mcp-app-server_ui://demo/dashboard`, and answers a
-read of the upstream's own URI with `-32602 Resource not found`. A link therefore keeps the URI its
-server declared — that is the app's identity and the name its window asks for — and this connector
-supplies `resourceUriPrefix` so the read goes out under the portal's name
-([`portal.ts`](../mcp-shared/src/portal.ts) states the rule; `appResourceUri` applies it). The minted
-link logs both names (`appUri`, `resourceUri`), which is the pair to read when one fails to open.
+an upstream's `ui://demo/dashboard` as `mcp-app-server_ui://demo/dashboard`, and the view a tool
+declares in `_meta.ui.resourceUri` is the upstream's plain `ui://` name. This connector supplies
+`resourceUriPrefix`, so that declared name is prefixed once —
+`ui://SuiteApps/…/prompt-library-app/mcp-app.html` becomes
+`netsuite-sb1_ui://SuiteApps/…/prompt-library-app/mcp-app.html`, the name the portal's own
+`resources/list` publishes — and that prefixed name is the app's identity and the name its window asks
+for. The portal also *decorates* advertised URIs with a `?server_id=` routing parameter; that is not
+part of a resource's identity and a read carrying it is refused, so `canonicalAppUri` drops it. The
+read then goes out under the prefixed name — the one production logs and `resources/list` both show
+the portal answers — and the resource's own `ui://` name is never tried, because the portal has already
+answered it with `-32602 Resource not found` and a second read of it would only repeat that. A name is
+taken only when its read yields an app document; when it yields none, the call's result is logged and
+the endpoint is asked once, with a bounded `resources/list`, what it does publish. The minted link logs
+both names (`appUri`, `resourceUri`), and `appResourceName` on the view lines records the name the read
+used, which is the pair to read when a link fails to open.
+
+The same prefix resolves the tools an app calls: a window's `tools/call` names the tool the way its
+own document knows it — the upstream's own name, e.g. `ns_getSuiteQLMetadata` — and the binding
+prefixes it once so the call reaches the endpoint under the name it answers, `netsuite-sb1_ns_getSuiteQLMetadata`
+(see `appToolNames` and `boundTool`). Without that, a working app would be refused with "this binding
+does not grant it" for a tool the grant plainly allows, because it belongs to the scoped server only
+under its namespaced name.
+
+A **Code Mode** grant names no single upstream server, so it supplies no `resourceUriPrefix`: there
+is no one server name for this connector to prefix a resource with, and the portal's own naming is
+whatever the sandbox result carried.
 
 Links minted before that prefix existed name a resource the portal will not serve, so a mint replaces
 one rather than reusing it when the binding's resource naming has changed; an untouched link still
@@ -258,10 +325,12 @@ addition:
 - **One portal per deployment.** `MCP_PORTAL_URL` is a single value; a second portal needs a
   second Worker.
 - **Server ids come from tool-name prefixes.** An aggregator that flattens tools without prefixing
-  them exposes no upstream seam, so this connector finds no server to scope a grant to and the form
-  stays unsubmittable. It is not granted as a whole endpoint — that grant does not exist here. Use
-  the **MCP** connector (`gatekeeper-mcp`) for such an endpoint, where endpoint-wide breadth is an
-  explicit, reviewable choice.
+  them exposes no upstream seam, so this connector finds no server to scope a **server** grant to and
+  that form stays unsubmittable. It is not granted as a bare-endpoint server grant — that breadth
+  does not exist here. A **Code Mode** grant reaches the whole portal if the portal offers it, but
+  through the portal's own sandbox rather than by exposing the endpoint's tools directly. For an
+  endpoint-wide grant over the tools themselves, use the **MCP** connector (`gatekeeper-mcp`), where
+  that breadth is an explicit, reviewable choice.
 
 ## Layout
 

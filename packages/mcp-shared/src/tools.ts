@@ -15,6 +15,10 @@ import {
   type McpTool,
   type McpToolCallResult,
 } from "./client.js";
+import {
+  PORTAL_CODEMODE_EXECUTE_TOOL,
+  PORTAL_CODEMODE_SEARCH_TOOL,
+} from "./portal.js";
 import type { McpCallResult, McpToolInfo, McpToolSummary } from "./types";
 import { hexEncode } from "./util.js";
 
@@ -76,8 +80,25 @@ function isDeclaredReadOnly(tool: McpTool): boolean {
  *
  * Every test is `=== true` or `=== false` rather than a truthiness check, so an unannotated tool
  * fails all of them and comes out as an action that can never auto-apply.
+ *
+ * `codeMode` names the two tools a Code Mode portal request exposes, and nothing about them is read
+ * from annotations: a sandbox that can call every upstream tool is exactly the thing whose own
+ * claims about itself must not decide its classification. `portal_codemode_search` only lists tool
+ * definitions, so it is a read; `portal_codemode_execute` can call any of them, so it is an action
+ * that is never auto-approvable, whatever the portal says and however trusted the endpoint is.
  */
-export function classifyTool(tool: McpTool, trust: ServerTrust): ClassifiedTool {
+export function classifyTool(
+  tool: McpTool, trust: ServerTrust, codeMode = false,
+): ClassifiedTool {
+  if (codeMode) {
+    if (tool.name === PORTAL_CODEMODE_SEARCH_TOOL) {
+      return { tool, mode: "read", autoApprovable: false, classifiedBy: "default" };
+    }
+    if (tool.name === PORTAL_CODEMODE_EXECUTE_TOOL) {
+      return { tool, mode: "action", autoApprovable: false, classifiedBy: "default" };
+    }
+  }
+
   const annotations = tool.annotations ?? {};
   const readOnly = isDeclaredReadOnly(tool);
 

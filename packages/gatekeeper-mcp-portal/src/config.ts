@@ -12,7 +12,12 @@ import { isValidToolName, type McpTool } from "@gadgets/mcp-shared/client";
 import { scopeAllows, type ToolScope } from "@gadgets/mcp-shared/scope";
 import { fetchOptions } from "@gadgets/mcp-shared/fetch";
 import { sameEndpoint } from "@gadgets/mcp-shared/scope";
-import { isPortalNativeTool, type PortalServer } from "@gadgets/mcp-shared/portal";
+import {
+  isPortalCodeMode,
+  isPortalNativeTool,
+  type PortalCodeMode,
+  type PortalServer,
+} from "@gadgets/mcp-shared/portal";
 import { classifyTool, type ServerTrust } from "@gadgets/mcp-shared/tools";
 
 /** The configured portal, once the deployment's vars have been read and validated. */
@@ -105,6 +110,9 @@ export function readPortalConfig(env: Env): PortalConfig | null {
  * all of them at once -- `scopeAllows` permits every tool that is not portal-native -- and that is
  * the one breadth this connector deliberately does not offer.
  *
+ * The check below is the server-grant shape only: a Code Mode grant names no server and is
+ * validated by `requirePortalCodeModeScope` instead, and a scope that sets both is refused here.
+ *
  * This is the enforcement, not the configurator. The form refuses to *emit* such a URL, but a
  * resource URL is not only ever produced by the form: an agent passes a concrete one to
  * `requestConnection`, and any URL under the portal's origin reaches `getGatekeeperClassFor`. A
@@ -114,6 +122,10 @@ export function readPortalConfig(env: Env): PortalConfig | null {
 export function requirePortalServerScope(
   scope: ToolScope,
 ): asserts scope is ToolScope & { serverId: string } {
+  if (scope.codeMode !== undefined) {
+    throw new Error(
+      "A Code Mode grant cannot also name an upstream server or tools. Pick one or the other.");
+  }
   if (scope.serverId === undefined) {
     throw new Error(
       "A portal grant has to name one of the servers behind the portal. Granting the portal itself " +
@@ -128,6 +140,26 @@ export function requirePortalServerScope(
     if (!isPortalToolGrantable(name, scope.serverId)) {
       throw new Error(`Tool "${name}" does not belong to portal server "${scope.serverId}".`);
     }
+  }
+}
+
+/**
+ * Refuses a Code Mode grant that also names one upstream server or tools.
+ *
+ * A Code Mode grant is deliberately all-or-nothing: the portal runs the code in its own sandbox and
+ * decides which upstream tool each call reaches, so a `#server=`/`#tool=` pin could not be enforced
+ * and is not accepted. The assertion narrows the scope to the mode this check validated.
+ */
+export function requirePortalCodeModeScope(
+  scope: ToolScope,
+): asserts scope is ToolScope & { codeMode: PortalCodeMode } {
+  if (!isPortalCodeMode(scope.codeMode)) {
+    throw new Error("A Code Mode grant has to select a Code Mode this connector supports.");
+  }
+  if (scope.serverId !== undefined || scope.tools !== undefined) {
+    throw new Error(
+      "A Code Mode grant covers the portal's Code Mode tools only, so it cannot also name an " +
+      "upstream server or individual tools.");
   }
 }
 

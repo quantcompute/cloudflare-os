@@ -3,9 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   APP_EXTENSION_ID,
   APP_MIME_TYPE,
+  appResourceNames,
   appResourceUri,
+  appToolNames,
+  canonicalAppUri,
   clampAppResult,
   clampResourceMeta,
+  isAppResourceUri,
+  prefixedAppUri,
   MAX_APP_CSP_DOMAINS,
   MAX_APP_CSP_DOMAIN_CHARS,
   MAX_APP_RESULT_BYTES,
@@ -82,40 +87,131 @@ describe("appResourceUri", () => {
       .toBe("mcp-app-server_ui://demo/dashboard");
   });
 
-    it("drops the portal's own server_id routing parameter before prefixing", () => {
-        // A portal injects `server_id=<id>` into the app URI it advertises; the upstream declared the
-        // URI without it and answers a read forwarded with it with an HTTP 400 (see fnbullion/NetSuite).
-        const portal = { ...BINDING, resourceUriPrefix: "netsuite-fnb_" };
+  it("drops the portal's own server_id routing parameter before prefixing", () => {
+    // A portal injects `server_id=<id>` into the app URI it advertises; the upstream declared the
+    // URI without it and answers a read forwarded with it with an HTTP 400 (see fnbullion/NetSuite).
+    const portal = { ...BINDING, resourceUriPrefix: "netsuite-fnb_" };
 
-        expect(appResourceUri(
-            portal,
-            "ui://SuiteApps/com.netsuite.mcpstandardtools/prompt-library-app/mcp-app.html" +
-            "?server_id=netsuite-fnb",
-        )).toBe(
-            "netsuite-fnb_ui://SuiteApps/com.netsuite.mcpstandardtools/prompt-library-app/mcp-app.html",
-        );
-        // Other parameters survive, and a URI without the parameter is untouched.
-        expect(appResourceUri(portal, "ui://demo/dashboard?a=1&server_id=x&b=2"))
-            .toBe("netsuite-fnb_ui://demo/dashboard?a=1&b=2");
-        expect(appResourceUri(portal, "ui://demo/dashboard?keep=1"))
-            .toBe("netsuite-fnb_ui://demo/dashboard?keep=1");
-    });
+    expect(appResourceUri(
+      portal,
+      "ui://SuiteApps/com.netsuite.mcpstandardtools/prompt-library-app/mcp-app.html" +
+      "?server_id=netsuite-fnb",
+    )).toBe(
+      "netsuite-fnb_ui://SuiteApps/com.netsuite.mcpstandardtools/prompt-library-app/mcp-app.html",
+    );
+    // Other parameters survive, and a URI without the parameter is untouched.
+    expect(appResourceUri(portal, "ui://demo/dashboard?a=1&server_id=x&b=2"))
+      .toBe("netsuite-fnb_ui://demo/dashboard?a=1&b=2");
+    expect(appResourceUri(portal, "ui://demo/dashboard?keep=1"))
+      .toBe("netsuite-fnb_ui://demo/dashboard?keep=1");
+  });
 
-    it("drops this deployment's own routing parameter before any endpoint sees the URI", () => {
-        // `server_id` names a server to a portal: the portal routes by it, and a window must not be
-        // able to smuggle it to an endpoint in the URI it asks to read.
-        expect(appResourceUri(BINDING, "ui://demo/dashboard?server_id=ws&keep=1"))
-            .toBe("ui://demo/dashboard?keep=1");
-        // A portal gets the same strip, applied before the prefix it routes by.
-        expect(appResourceUri({ ...BINDING, resourceUriPrefix: "portal_" }, "ui://demo/a?server_id=c&x=1"))
-            .toBe("portal_ui://demo/a?x=1");
-        // A bare name with no `=` is dropped the same way.
-        expect(appResourceUri({ ...BINDING, resourceUriPrefix: "portal_" }, "ui://demo/a?server_id"))
-            .toBe("portal_ui://demo/a");
-        // Only host-owned names go: a parameter that merely starts with one is the server's business.
-        expect(appResourceUri({ ...BINDING, resourceUriPrefix: "portal_" }, "ui://demo/a?server_idx=1"))
-            .toBe("portal_ui://demo/a?server_idx=1");
-    });
+  it("drops this deployment's own routing parameter before any endpoint sees the URI", () => {
+    // `server_id` names a server to a portal: the portal routes by it, and a window must not be
+    // able to smuggle it to an endpoint in the URI it asks to read.
+    expect(appResourceUri(BINDING, "ui://demo/dashboard?server_id=ws&keep=1"))
+      .toBe("ui://demo/dashboard?keep=1");
+    // A portal gets the same strip, applied before the prefix it routes by.
+    expect(appResourceUri({ ...BINDING, resourceUriPrefix: "portal_" }, "ui://demo/a?server_id=c&x=1"))
+      .toBe("portal_ui://demo/a?x=1");
+    // A bare name with no `=` is dropped the same way.
+    expect(appResourceUri({ ...BINDING, resourceUriPrefix: "portal_" }, "ui://demo/a?server_id"))
+      .toBe("portal_ui://demo/a");
+    // Only host-owned names go: a parameter that merely starts with one is the server's business.
+    expect(appResourceUri({ ...BINDING, resourceUriPrefix: "portal_" }, "ui://demo/a?server_idx=1"))
+      .toBe("portal_ui://demo/a?server_idx=1");
+  });
+});
+
+describe("appResourceNames", () => {
+  it("reads a resource under the name it declared when the endpoint does not rename", () => {
+    expect(appResourceNames(BINDING, "ui://weather/current")).toEqual(["ui://weather/current"]);
+  });
+
+  it("reads only the binding's prefixed name when the endpoint renames", () => {
+    // A portal refuses the upstream's own name, so the unprefixed one is never tried.
+    expect(appResourceNames({ ...BINDING, resourceUriPrefix: "portal_" }, "ui://weather/current"))
+      .toEqual(["portal_ui://weather/current"]);
+  });
+
+  it("drops the endpoint's own routing parameter so the name carries none", () => {
+    // A portal decorates the URIs it advertises with `?server_id=`, but a read carrying it is
+    // refused, so the name may not keep it (see `canonicalAppUri`).
+    expect(appResourceNames(
+      { ...BINDING, resourceUriPrefix: "netsuite-sb1_" },
+      "ui://SuiteApps/app/index.html?server_id=netsuite-sb1",
+    )).toEqual(["netsuite-sb1_ui://SuiteApps/app/index.html"]);
+  });
+
+  it("prefixes a declared name once, never twice", () => {
+    // The URI taken from `_meta.ui.resourceUri` is the upstream's plain name; a name that already
+    // carries the prefix (from a result that used the endpoint's own) is left alone.
+    expect(appResourceNames(
+      { ...BINDING, resourceUriPrefix: "netsuite-sb1_" },
+      "netsuite-sb1_ui://SuiteApps/app/index.html",
+    )).toEqual(["netsuite-sb1_ui://SuiteApps/app/index.html"]);
+  });
+});
+
+describe("prefixedAppUri", () => {
+  it("prefixes a ui:// name once, and leaves an endpoint's own name untouched", () => {
+    expect(prefixedAppUri("netsuite-sb1_", "ui://demo/a")).toBe("netsuite-sb1_ui://demo/a");
+    expect(prefixedAppUri("netsuite-sb1_", "netsuite-sb1_ui://demo/a"))
+      .toBe("netsuite-sb1_ui://demo/a");
+    // No prefix (an endpoint that serves a resource under its own name) is the identity.
+    expect(prefixedAppUri(undefined, "ui://demo/a")).toBe("ui://demo/a");
+    expect(prefixedAppUri("", "ui://demo/a")).toBe("ui://demo/a");
+  });
+});
+
+describe("appToolNames", () => {
+  it("calls a tool under the name it declared when the endpoint does not rename", () => {
+    // An endpoint that serves its own tools, so what the window asked for is the wire name.
+    expect(appToolNames(BINDING, "ns_getSuiteQLMetadata")).toEqual(["ns_getSuiteQLMetadata"]);
+  });
+
+  it("namespaces a tool under the server prefix a portal serves it with", () => {
+    // A portal serves an upstream `ns_getSuiteQLMetadata` as `netsuite-sb1_ns_getSuiteQLMetadata`,
+    // and the app can only know the upstream's own name, so the binding supplies the prefix it
+    // already applies to that server's resources.
+    expect(appToolNames(
+      { ...BINDING, resourceUriPrefix: "netsuite-sb1_" },
+      "ns_getSuiteQLMetadata",
+    )).toEqual(["netsuite-sb1_ns_getSuiteQLMetadata"]);
+  });
+
+  it("prefixes a name that already carries the prefix once, never twice", () => {
+    expect(appToolNames(
+      { ...BINDING, resourceUriPrefix: "netsuite-sb1_" },
+      "netsuite-sb1_ns_getSuiteQLMetadata",
+    )).toEqual(["netsuite-sb1_ns_getSuiteQLMetadata"]);
+  });
+});
+
+describe("isAppResourceUri", () => {
+  it("accepts a ui:// name and an endpoint's prefixed one, and nothing else", () => {
+    expect(isAppResourceUri(undefined, "ui://demo/a")).toBe(true);
+    expect(isAppResourceUri("netsuite-sb1_", "netsuite-sb1_ui://demo/a")).toBe(true);
+    // The prefix is only stripped for the binding that owns it.
+    expect(isAppResourceUri("other_", "netsuite-sb1_ui://demo/a")).toBe(false);
+    expect(isAppResourceUri("netsuite-sb1_", "https://example.com/a")).toBe(false);
+  });
+});
+
+describe("canonicalAppUri", () => {
+  it("keeps a ui:// URI and drops only the parameters this deployment owns", () => {
+    expect(canonicalAppUri("ui://demo/a")).toBe("ui://demo/a");
+    expect(canonicalAppUri("ui://demo/a?keep=1")).toBe("ui://demo/a?keep=1");
+    expect(canonicalAppUri("ui://demo/a?server_id=x&b=2")).toBe("ui://demo/a?b=2");
+    // A bare name with no `=` is dropped the same way; a parameter that merely starts with a
+    // host-owned one is the server's business.
+    expect(canonicalAppUri("ui://demo/a?server_id")).toBe("ui://demo/a");
+    expect(canonicalAppUri("ui://demo/a?server_idx=1")).toBe("ui://demo/a?server_idx=1");
+    // A percent-encoded spelling names the same parameter, so it is dropped too; a name that will
+    // not decode is compared as written.
+    expect(canonicalAppUri("ui://demo/a?server%5Fid=x&b=2")).toBe("ui://demo/a?b=2");
+    expect(canonicalAppUri("ui://demo/a?bad%zz=1")).toBe("ui://demo/a?bad%zz=1");
+  });
 });
 
 describe("toolUiResourceUri", () => {
@@ -172,7 +268,7 @@ describe("isAppMimeType", () => {
     // Servers written before the profile type existed -- the playground ones users paste in -- serve
     // a bare `text/html`, and a document is qualified by its `ui://` URI, not by this string.
     for (const declared of ["text/html;profile=mcp-app", "text/html", "text/html; charset=utf-8",
-                            "TEXT/HTML"]) {
+      "TEXT/HTML"]) {
       expect(isAppMimeType(declared)).toBe(true);
     }
     for (const declared of ["text/plain", "application/xhtml+xml", "text/htmlx", undefined]) {

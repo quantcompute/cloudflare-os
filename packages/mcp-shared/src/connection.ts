@@ -17,6 +17,7 @@ import {
 }
   from "./client.js";
 import { fetchOptions, type InsecureEnv } from "./fetch.js";
+import { withCodeMode, type PortalCodeMode } from "./portal.js";
 import { MAX_TOOLS_PER_SERVER } from "./tools.js";
 
 /** The environment this module reads. Each Worker's own `Env` satisfies it structurally. */
@@ -30,6 +31,16 @@ export type WithClientOptions = {
   retryOnExpiry?: boolean;
   /** Absolute deadline shared with time spent waiting for a discovery slot. */
   deadline?: number;
+  /**
+   * Portal Code Mode flavor this connection is for, taken from the binding's scope. When set, every
+   * request carries the portal's Code Mode query parameter, and the transport session is read and
+   * written under this flavor: a portal answers with a different tool set per flavor, so one
+   * flavor's session must never be handed to another.
+   *
+   * Absent for every grant that is not a code-mode one, which is also what picks the plain endpoint
+   * request URL and the plain session.
+   */
+  codeMode?: PortalCodeMode;
 };
 
 /**
@@ -40,7 +51,11 @@ export type WithClientOptions = {
 export type McpConnection = {
   /** Bearer token, or null for a public server. */
   authorization: string | null;
-  /** Transport session id from a previous `initialize`, if one is cached. */
+  /**
+   * Transport session id from a previous `initialize`, if one is cached -- for the same connection
+   * flavor the caller is about to request. Each flavor has its own session, since what a portal
+   * lists differs between them.
+   */
   sessionId: string | null;
   /**
    * Persisted account generation. Every state write after an await returns this to the account, so
@@ -57,15 +72,17 @@ export type ConnectionAccount = {
   /**
    * `endpoint` binds the credential response to where the caller will send it. An account may be
    * repointed while an older facet still exists; returning current credentials to that facet would
-   * send the new server's bearer token to the old server.
+   * send the new server's bearer token to the old server. `codeMode` selects which flavor's
+   * transport session is returned, and never changes which endpoint is checked.
    */
-  getConnection(endpoint: string): Promise<McpConnection>;
+  getConnection(endpoint: string, codeMode?: PortalCodeMode): Promise<McpConnection>;
   assertConnectionCurrent(endpoint: string, generation: number): Promise<void>;
   setMcpSessionId(
     endpoint: string,
     generation: number,
     previousSessionId: string | null,
     sessionId: string | null,
+    codeMode?: PortalCodeMode,
   ): Promise<boolean>;
   noteCredentialsExpired(endpoint: string, generation: number): Promise<void>;
 };
@@ -95,13 +112,18 @@ export async function withClient<T>(
   // valid here stays valid for the handful of requests a single `withClient` makes.
   let connection: McpConnection;
   try {
-    connection = await account.getConnection(endpoint);
+    connection = await account.getConnection(endpoint, options.codeMode);
   } catch (err) {
     throw notDispatched(err);
   }
   const { authorization, sessionId, generation } = connection;
+  // The account is always addressed by the binding's endpoint; only the request URL carries the
+  // mode, because that is what makes the portal answer with its Code Mode tool pair.
+  const requestUrl = options.codeMode === undefined
+    ? endpoint
+    : withCodeMode(endpoint, options.codeMode);
   const client = new McpClient(
-    endpoint, async method => {
+    requestUrl, async method => {
       if (method === "tools/call") {
         await account.assertConnectionCurrent(endpoint, generation);
       }
@@ -115,7 +137,7 @@ export async function withClient<T>(
   const persistSession = async (): Promise<void> => {
     if (client.sessionId === persistedSessionId) return;
     const accepted = await account.setMcpSessionId(
-      endpoint, generation, persistedSessionId, client.sessionId);
+      endpoint, generation, persistedSessionId, client.sessionId, options.codeMode);
     if (!accepted) {
       await client.closeSession().catch(() => undefined);
       throw new McpCallNotDispatchedError(
@@ -175,7 +197,8 @@ export async function withClient<T>(
       // reason already known, including the retry the Workshop offers the user. Clearing it makes
       // the next call re-initialize.
       if (persistedSessionId) {
-        await account.setMcpSessionId(endpoint, generation, persistedSessionId, null);
+        await account.setMcpSessionId(
+          endpoint, generation, persistedSessionId, null, options.codeMode);
       }
       throw err;
     }
@@ -190,6 +213,10 @@ export async function withClient<T>(
 /**
  * Lists an endpoint's tools, bounded by `MAX_TOOLS_PER_SERVER`. Reports whether a cap cut the
  * listing short, since callers infer what the endpoint is from what it does and does not offer.
+ *
+ * `options.codeMode` is forwarded like every other option, and it is what makes a Code Mode portal
+ * answer with its two tools instead of the upstream catalog: the URL the mode is applied to is this
+ * call's request URL.
  */
 export async function fetchTools(
   env: ConnectionEnv,

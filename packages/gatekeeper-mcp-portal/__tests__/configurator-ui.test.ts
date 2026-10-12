@@ -52,7 +52,7 @@ function harness(
 }
 
 const portalValues = (server: string): Values =>
-  ({ server, mode: "all", tools: null, endpointKind: "portal" });
+  ({ server, mode: "all", tools: null, codeMode: null, endpointKind: "portal" });
 
 let spec: Awaited<ReturnType<typeof loadSpec>>;
 beforeEach(async () => { spec = await loadSpec(); });
@@ -141,6 +141,61 @@ describe("portal configurator", () => {
     expect(rendered).toContain("CheckboxList");
     expect(rendered).toContain('"disabled":true');
     expect(rendered).toContain('"allSelected":true');
+  });
+});
+
+describe("a Code Mode grant", () => {
+  const url = "https://gw.example.com/mcp#codemode=search_and_execute";
+
+  it("reopens selected and ready without picking a server", async () => {
+    const ui = rpcWithServers("linear");
+    const values = await spec.initialValuesFromResourceUrl(
+      { resourceUrl: url, ui } as never) as Values;
+
+    expect(values.codeMode).toBe("search_and_execute");
+    expect(spec.isReady({ values } as never)).toBe(true);
+    await expect(spec.resourceUrl({ values, ui } as never)).resolves.toBe(url);
+  });
+
+  it("hides the server and tool questions while it is selected", () => {
+    const ui = rpcWithServers("linear");
+    const rendered = JSON.stringify(harness(
+      spec, { ...portalValues("linear"), codeMode: "search_and_execute" }, ui).render());
+
+    expect(rendered).toContain("Code Mode");
+    expect(rendered).not.toContain("Autocomplete");
+    expect(rendered).not.toContain("CheckboxList");
+  });
+
+  it("is picked from the grant cards and emitted as the fragment", async () => {
+    const ui = rpcWithServers("linear");
+    const app = harness(spec, portalValues("linear"), ui);
+    const cards = propsFor(app.render(), "RadioCards");
+    expect((cards.options as Array<{ value: string }>).map(option => option.value))
+      .toEqual(["server", "codemode"]);
+
+    (cards.onChange as (kind: string) => void)("codemode");
+    expect(app.values.codeMode).toBe("search_and_execute");
+    await expect(spec.resourceUrl({ values: app.values, ui } as never)).resolves.toBe(url);
+  });
+
+  it("stays on the server side for a mode this connector does not mint", async () => {
+    // The mint refuses an unknown mode, so the form must not present it as a selected Code Mode
+    // grant; the person can still repair the resource URL with an ordinary server grant.
+    const ui = rpcWithServers("linear");
+    const values = await spec.initialValuesFromResourceUrl({
+      resourceUrl: "https://gw.example.com/mcp#codemode=bogus", ui,
+    } as never) as Values;
+
+    expect(values.codeMode).toBeNull();
+    await expect(spec.resourceUrl({ values, ui } as never)).resolves.toBe(
+      "https://gw.example.com/mcp#server=linear");
+  });
+
+  it("is not ready without a portal the listing could confirm", () => {
+    expect(spec.isReady({ values: {
+      server: null, mode: "all", tools: null, codeMode: "search_and_execute", endpointKind: "empty",
+    } } as never)).toBe(false);
   });
 });
 

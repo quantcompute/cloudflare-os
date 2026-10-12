@@ -83,6 +83,9 @@ export type ScopedCatalog = {
  */
 export async function scopedCatalog(request: CatalogRequest): Promise<ScopedCatalog> {
   const cached = request.store.get<CachedCatalog>("catalog");
+  // The grant's flavor decides both what is listed and how it is classified, so it is read once
+  // here and used for the fetch, the scope check, and the classification alike.
+  const codeMode = request.scope.codeMode;
   let tools = cached?.tools;
   let truncated = cached?.truncated ?? false;
 
@@ -94,7 +97,7 @@ export async function scopedCatalog(request: CatalogRequest): Promise<ScopedCata
         request.account,
         request.endpoint,
         serverId ? tool => toolBelongsToServer(tool.name, serverId) : undefined,
-        { deadline: request.deadline },
+        { deadline: request.deadline, codeMode },
       );
       const revision = await catalogRevision(fetched.tools);
       if (cached && cached.revision !== revision) {
@@ -134,14 +137,19 @@ export async function scopedCatalog(request: CatalogRequest): Promise<ScopedCata
   // scope first is what keeps the `portal_*` exclusion in force: without it, a `#server=portal`
   // grant would filter down to exactly the portal's own tools, find no evidence of a portal, and let
   // a Gadget call `portal_toggle_servers` to widen its own reach.
+  //
+  // A code-mode grant is the same case for the same reason: its request URL makes the portal list
+  // only its two Code Mode tools, so no `portal_list_servers` is there to see, and only the portal
+  // connector mints such a grant.
   const isPortal = request.scope.serverId !== undefined
+    || codeMode !== undefined
     || looksLikePortal(all, { truncated, cap: MAX_TOOLS_PER_SERVER });
   return {
     isPortal,
     truncated,
     tools: all
       .filter(tool => scopeAllows(request.scope, tool.name, isPortal))
-      .map(tool => classifyTool(tool, request.trust)),
+      .map(tool => classifyTool(tool, request.trust, codeMode !== undefined)),
   };
 }
 

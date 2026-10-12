@@ -17,6 +17,16 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+// Identifies this connector on every outbound request.
+//
+// The Workers runtime supplies a `User-Agent` of its own, but the local dev runtime (Miniflare)
+// sends none at all, and bot protection in front of an endpoint answers a header-less request with
+// a managed challenge instead of the MCP or OAuth response it would otherwise return. A connect
+// that works in production would then fail in local dev with a 403 the caller cannot tell from a
+// real refusal. Sending one explicitly makes the two runtimes behave alike, and gives an endpoint
+// operator a stable string to allowlist. Same value the other gatekeeper API clients send.
+const USER_AGENT = "Cloudflare-Gadgets";
+
 /** Policy and deadline options applied to one outbound operation. */
 export type FetchOptions = {
   /** Permits plain HTTP and private hosts for local development. */
@@ -148,6 +158,7 @@ export async function guardedFetch(
 
   let current = url;
   let headers = new Headers(init.headers);
+  if (!headers.has("User-Agent")) headers.set("User-Agent", USER_AGENT);
   let method = init.method ?? "GET";
   let body = init.body;
   const origin = new URL(url).origin;

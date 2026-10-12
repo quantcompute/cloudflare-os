@@ -35,8 +35,11 @@ import { withClient, type ConnectionAccount } from "@gadgets/mcp-shared/connecti
 import { McpSessionBase } from "@gadgets/mcp-shared/session";
 import { McpFacetBase } from "@gadgets/mcp-shared/facet";
 import {
+  isPortalCodeMode,
   looksLikePortal,
   parsePortalServers,
+  PORTAL_CODEMODE_EXECUTE_TOOL,
+  PORTAL_CODEMODE_SEARCH_TOOL,
   PORTAL_LIST_SERVERS_TOOL,
   portalResourcePrefix,
   reconcilePortalServers,
@@ -75,6 +78,7 @@ import {
   portalTokenFor,
   portalTrust,
   readPortalConfig,
+  requirePortalCodeModeScope,
   requirePortalServerVisible,
   requirePortalServerScope,
   isPortalToolGrantable,
@@ -143,28 +147,56 @@ async function tryListPortalServers(
 }
 
 /**
- * Validates one portal-scoped resource URL, returning the scope it grants together with the upstream
- * server that scope names, when the portal reported one. Throws if the scope is not grantable.
+ * Validates one portal resource URL, returning the scope it grants together with the upstream server
+ * that scope names, when there is one and the portal reported it. Throws if the scope is not
+ * grantable.
  *
- * The fragment records how much of the portal this binding may call; see `scope.ts`. A grant that
- * names no upstream server would reach every system behind the portal, so it is refused here rather
- * than only in the form that normally builds these URLs.
+ * The fragment records how much of the portal this binding may call; see `scope.ts`. A server grant
+ * that names no upstream server would reach every system behind the portal, so it is refused here
+ * rather than only in the form that normally builds these URLs. A Code Mode grant is the deliberate
+ * exception -- it is the portal's own gated breadth, not a missing server pin -- and is validated by
+ * connecting with the code-mode parameter and proving both Code Mode tools exist. It covers every
+ * upstream tool the portal's sandbox can reach, which no `#server=`/`#tool=` pin could narrow
+ * (`requirePortalCodeModeScope` refuses one that tries).
  *
  * The server-list result is advisory metadata, so failing to obtain it is not fatal on its own. But
  * the endpoint still has to prove it implements the portal capability before a portal-scoped binding
  * can be minted, which is what the `findTool` probe below establishes.
  *
- * Each mode then fetches only the names validation still needs. Named grants prove each selected
- * name. A reported server needs no catalog scan; an unreported server needs one prefixed tool as
- * fallback evidence.
+ * Each server-grant mode then fetches only the names validation still needs. Named grants prove each
+ * selected name. A reported server needs no catalog scan; an unreported server needs one prefixed
+ * tool as fallback evidence.
  */
 async function validatePortalScope(
   env: Env,
   account: DurableObjectStub<McpAccount>,
   endpoint: string,
   requested: URL,
-): Promise<{ scope: ToolScope & { serverId: string }; upstream: PortalServer | undefined }> {
+): Promise<{ scope: ToolScope; upstream: PortalServer | undefined }> {
   const scope = parseToolScope(requested);
+
+  // Code Mode is the one grant that names no upstream server: the portal hides every upstream tool
+  // and exposes two of its own, whose sandbox may call anything the portal enables. There is no
+  // server or tool list to validate, and no pin that could be enforced, so what is left to prove is
+  // that the portal actually serves Code Mode.
+  if (isPortalCodeMode(scope.codeMode)) {
+    requirePortalCodeModeScope(scope);
+    // Probe the way the binding will connect, parameter included. A portal serves Code Mode only
+    // while its Code Mode policy is opt-in, so one that does not is refused here rather than minted
+    // with a catalog that would come back empty.
+    for (const name of [PORTAL_CODEMODE_SEARCH_TOOL, PORTAL_CODEMODE_EXECUTE_TOOL]) {
+      const tool = await withClient(env, account, endpoint,
+        client => client.findTool(name), { codeMode: scope.codeMode });
+      if (!tool) {
+        throw new Error(
+          `${hostOf(endpoint)} does not serve the portal Code Mode tool "${name}". A portal ` +
+          "serves Code Mode only while its Code Mode policy is opt-in; ask an administrator to " +
+          "check it.");
+      }
+    }
+    return { scope: { codeMode: scope.codeMode }, upstream: undefined };
+  }
+
   requirePortalServerScope(scope);
   requirePortalServerVisible(env, scope.serverId);
 
@@ -420,12 +452,15 @@ export class GatekeeperUserImpl
     const { scope, upstream } = await validatePortalScope(
       this.env, account, server.endpoint, requested);
 
+    // `scopeServerName` describes the upstream server a server grant names; a Code Mode grant names
+    // none, so the label comes from the mode instead (see `#scopeLabel`).
+    const scopeServerName = upstream?.name ?? scope.serverId;
     const props: McpGatekeeperImplProps = {
       accountObjectId: this.ctx.props.accountObjectId,
       endpoint: server.endpoint,
       serverId: server.serverId,
       serverName: config.name,
-      scopeServerName: upstream?.name ?? scope.serverId,
+      ...(scopeServerName === undefined ? {} : { scopeServerName }),
       scope,
     };
     return { class: this.ctx.exports.McpGatekeeperImpl({ props }), resource };
@@ -533,10 +568,12 @@ type McpGatekeeperImplProps = {
   endpoint: string;
   serverId: string;
   serverName: string;
-  // Optional for facets minted before catalog-backed validation persisted the upstream display name.
+  // Optional for facets minted before catalog-backed validation persisted the upstream display name,
+  // and absent entirely for a Code Mode grant, which names no upstream server.
   scopeServerName?: string;
-  // How much of one upstream server this binding may call.
-  scope: ToolScope & { serverId: string };
+  // How much of the portal this binding may call: one upstream server, optionally pinned to its
+  // tools, or the portal's Code Mode tools. See `scope.ts`.
+  scope: ToolScope;
 };
 
 export class McpGatekeeperImpl
@@ -561,10 +598,12 @@ export class McpGatekeeperImpl
 
   /**
    * This endpoint is a portal, so it names the resources it fronts after the upstream server that
-   * owns them -- the same prefix its tools carry.
+   * owns them -- the same prefix its tools carry. A Code Mode grant owns no upstream server, and
+   * its tools are the portal's own, so it has no prefix.
    */
-  protected get resourceUriPrefix(): string {
-    return portalResourcePrefix(this.ctx.props.scope.serverId);
+  protected get resourceUriPrefix(): string | undefined {
+    const { serverId } = this.ctx.props.scope;
+    return serverId === undefined ? undefined : portalResourcePrefix(serverId);
   }
 
   protected get sessionClass() {
@@ -578,6 +617,7 @@ export class McpGatekeeperImpl
   // How this binding's breadth reads to a human, for approval prompts and the bindings list.
   #scopeLabel(): string {
     const { scope, serverName, scopeServerName } = this.ctx.props;
+    if (isPortalCodeMode(scope.codeMode)) return `${serverName} / Code Mode`;
     return `${serverName} / ${scopeServerName ?? scope.serverId}`;
   }
 
@@ -589,12 +629,21 @@ export class McpGatekeeperImpl
 
     const counts = `${reads} read-only, ${tools.length - reads} requiring approval`;
     const plural = tools.length === 1 ? "" : "s";
-    const snippet = scope.tools
-      ? `${scope.tools.length} named MCP tool${scope.tools.length === 1 ? "" : "s"} on ` +
-        `${label} \u2014 ${counts}. Other tools are refused.`
-      : `All tools of the ${this.ctx.props.scopeServerName ?? scope.serverId} server on ` +
+    let snippet: string;
+    if (isPortalCodeMode(scope.codeMode)) {
+      // A Code Mode grant is wider than describe can enumerate: its sandbox reaches every upstream
+      // tool the portal enables, which is exactly what the person granting is told.
+      snippet = `Code Mode on ${this.ctx.props.serverName}: ${tools.length} portal tool ` +
+        `definition${plural} shown here (${counts}). The sandbox can call any tool of any ` +
+        `upstream server the portal enables.`;
+    } else if (scope.tools) {
+      snippet = `${scope.tools.length} named MCP tool${scope.tools.length === 1 ? "" : "s"} on ` +
+        `${label} \u2014 ${counts}. Other tools are refused.`;
+    } else {
+      snippet = `All tools of the ${this.ctx.props.scopeServerName ?? scope.serverId} server on ` +
         `${this.ctx.props.serverName}; ${tools.length} tool definition${plural} shown here ` +
         `(${counts}). Use listTools({ search }) for others. Other servers are refused.`;
+    }
 
     return {
       url: this.resourceUrl,
@@ -607,14 +656,15 @@ export class McpGatekeeperImpl
 
   // Identifies this binding's shape for naming. Server-scoped bindings get their own suggested name
   // and session type, so two bindings onto different servers of one portal do not collide and the
-  // agent's type for the GitHub half of a portal is named after GitHub.
+  // agent's type for the GitHub half of a portal is named after GitHub. A Code Mode grant names no
+  // upstream server, so it gets its own fixed name rather than `{server}-undefined`.
   //
   // This is a readable label, not an identity: two grants pinning different tools of one upstream
   // server produce the same id. `sessionTypeName` is what separates them, from the scoped resource
   // URL.
   #bindingId(): string {
     const { scope, serverId } = this.ctx.props;
-    return `${serverId}-${scope.serverId}`;
+    return isPortalCodeMode(scope.codeMode) ? "codemode" : `${serverId}-${scope.serverId}`;
   }
 
   /**

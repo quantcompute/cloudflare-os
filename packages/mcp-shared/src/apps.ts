@@ -48,15 +48,17 @@ export const APP_ERROR_NOT_PERMITTED = -32001;
  * reads either sentence, so the two are one sentence.
  */
 export const APP_MESSAGE_NOT_SUBSCRIBED =
-  "This app is not sending messages to the chat yet. Ask the agent in the chat to subscribe to " +
-  "this app's messages, then open the link again.";
+ "This app is not sending messages to the chat yet. Ask the agent in the chat to subscribe to " +
+ "this app's messages, then open the link again.";
 
-// Document and result budgets, chosen against limits the deployment already has. A document over
-// half of the transport's `MAX_RESPONSE_BYTES` could not have arrived in one piece anyway, and a
-// result at half of the 128 KiB Durable Object value limit leaves the account room to keep one
-// beside the token record it is stored in.
-/** Largest app document this host renders, in bytes. */
-export const MAX_APP_HTML_BYTES = 512 * 1024;
+// The result budget is chosen against a limit the deployment already has: a result at half of the
+// 128 KiB Durable Object value limit leaves the account room to keep one beside the token record
+// it is stored in. There is deliberately no matching budget for an app document: a document is
+// the page itself and nothing stores it, so a resource read carries no byte budget of its own,
+// and the transport's own `MAX_RESPONSE_BYTES` does not apply to it either. That leaves the
+// Worker's memory as the only bound, and the reply is held whole while it is parsed (see
+// `readSseResponse`). A document budget would have reported a served application as a server
+// serving nothing.
 /** Largest tool result a sidecar window is sent, in bytes. */
 export const MAX_APP_RESULT_BYTES = 64 * 1024;
 // What one resource may declare, per directive and per domain. A declaration is server-controlled,
@@ -79,59 +81,65 @@ const RESULT_ENVELOPE_BYTES = 64;
 // clipped block is `{"type":"text","text":"<prefix>…"}` and nothing else.
 const ELLIPSIS = "\u2026";
 const TEXT_BLOCK_BYTES = encoder.encode(`{"type":"text","text":""}`).byteLength
-  + encoder.encode(ELLIPSIS).byteLength;
+ + encoder.encode(ELLIPSIS).byteLength;
 
 /** Everything a read needs about the binding an app belongs to, without the facet that minted it. */
 export type AppBinding = {
-  /** MCP endpoint URL. */
-  endpoint: string;
-  /** Display name of the server, for error text. */
-  serverName: string;
-  /** The grant this binding was created with; every app call is checked against it. */
-  scope: ToolScope;
-  /** How far this endpoint's self-description is trusted (see `tools.ts`). */
-  trust: ServerTrust;
-  /**
-   * Prefix this endpoint serves its resources under, when it renames them.
-   *
-   * A portal does: it lists and reads an upstream resource as `{serverId}_{uri}`, so the URI the
-   * upstream server declared is answered with "Resource not found" (see `portalResourcePrefix`).
-   * Absent for every endpoint that serves a resource under the URI it declared. The declared URI
-   * stays the link's identity and the name its window asks for either way.
-   */
-  resourceUriPrefix?: string;
+ /** MCP endpoint URL. */
+ endpoint: string;
+ /** Display name of the server, for error text. */
+ serverName: string;
+ /** The grant this binding was created with; every app call is checked against it. */
+ scope: ToolScope;
+ /** How far this endpoint's self-description is trusted (see `tools.ts`). */
+ trust: ServerTrust;
+ /**
+  * Prefix this endpoint serves its resources under, when it renames them.
+  *
+  * A portal that namespaces resources does: it lists and reads an upstream resource as
+  * `{serverId}_{uri}` and refuses the URI the upstream declared. When set, that namespaced name is
+  * tried first and the resource's own `ui://` name only after it (`appResourceNames`); absent for
+  * every endpoint that serves a resource under the `ui://` URI it declared, where the two coincide.
+  * The resource's own `ui://` name stays the link's identity and the name its window asks for
+  * either way.
+  *
+  * The same prefix is this endpoint's namespacing of the tool names it fronts (see `appToolNames`):
+  * a portal serves an upstream `ns_getSuiteQLMetadata` as `{serverId}_ns_getSuiteQLMetadata`, which
+  * is the name an app's `tools/call` reaches it under.
+  */
+ resourceUriPrefix?: string;
 };
 
 /** The tool call whose result the sidecar opens on. */
 export type AppCallSnapshot = {
-  toolName: string;
-  /** The arguments the agent passed. */
-  input: unknown;
-  /** The server's result, bounded; absent when it was too large to keep. */
-  result?: unknown;
+ toolName: string;
+ /** The arguments the agent passed. */
+ input: unknown;
+ /** The server's result, bounded; absent when it was too large to keep. */
+ result?: unknown;
 };
 
 /** Everything the sidecar page needs to render, resolved at page-load time. */
 export type AppViewPage = {
-  /** The `ui://` resource being rendered. */
-  uri: string;
-  title?: string;
-  /** The app's HTML document, straight from the server. */
-  html: string;
-  /** CSP the sandbox proxy must apply to the app document. */
-  csp: string;
-  /** `allow` attribute for the app frame, from the resource's declared permissions; absent when none. */
-  allow?: string;
-  call?: AppCallSnapshot;
-  /**
-   * Whether this view can send messages into the conversation its link came from.
-   *
-   * Read from the subscription registered beside the token -- the user's own enable action -- never
-   * from anything the server sent. The page declares `ui/message` -- and offers the consent that has
-   * to precede a delivery -- only when it is true, and a link nobody has subscribed to is answered
-   * with the sentence asking for one (`APP_MESSAGE_NOT_SUBSCRIBED`).
-   */
-  canMessage?: boolean;
+ /** The `ui://` resource being rendered. */
+ uri: string;
+ title?: string;
+ /** The app's HTML document, straight from the server. */
+ html: string;
+ /** CSP the sandbox proxy must apply to the app document. */
+ csp: string;
+ /** `allow` attribute for the app frame, from the resource's declared permissions; absent when none. */
+ allow?: string;
+ call?: AppCallSnapshot;
+ /**
+  * Whether this view can send messages into the conversation its link came from.
+  *
+  * Read from the subscription registered beside the token -- the user's own enable action -- never
+  * from anything the server sent. The page declares `ui/message` -- and offers the consent that has
+  * to precede a delivery -- only when it is true, and a link nobody has subscribed to is answered
+  * with the sentence asking for one (`APP_MESSAGE_NOT_SUBSCRIBED`).
+  */
+ canMessage?: boolean;
 };
 
 /** Why a sidecar page could not be rendered. Shown to the user verbatim. */
@@ -142,22 +150,22 @@ export type AppRpcReply = { body: string; status: number };
 
 /** The CSP and permissions a `ui://` resource declared under `_meta.ui`. */
 export type McpAppResourceMeta = {
-  /** Origins the document may load from, by directive. */
-  csp?: McpAppResourceCsp;
-  /** Browser features the document may request. */
-  permissions?: McpAppResourcePermissions;
+ /** Origins the document may load from, by directive. */
+ csp?: McpAppResourceCsp;
+ /** Browser features the document may request. */
+ permissions?: McpAppResourcePermissions;
 };
 
 /** The domains a resource declared, each optional. Everything absent is the restrictive default. */
 export type McpAppResourceCsp = {
-  /** Origins `connect-src` allows: `fetch`, XHR, and WebSocket targets. */
-  connectDomains?: string[];
-  /** Origins scripts, styles, images, fonts, and media may be loaded from. */
-  resourceDomains?: string[];
-  /** Origins a nested iframe may be loaded from (`frame-src`). */
-  frameDomains?: string[];
-  /** Origins a `<base href>` may point at (`base-uri`). */
-  baseUriDomains?: string[];
+ /** Origins `connect-src` allows: `fetch`, XHR, and WebSocket targets. */
+ connectDomains?: string[];
+ /** Origins scripts, styles, images, fonts, and media may be loaded from. */
+ resourceDomains?: string[];
+ /** Origins a nested iframe may be loaded from (`frame-src`). */
+ frameDomains?: string[];
+ /** Origins a `<base href>` may point at (`base-uri`). */
+ baseUriDomains?: string[];
 };
 
 /**
@@ -168,36 +176,36 @@ export type McpAppResourceCsp = {
  * boolean per feature: true for one the resource asked for, false for one it did not mention.
  */
 export type McpAppResourcePermissions = {
-  camera?: boolean;
-  microphone?: boolean;
-  geolocation?: boolean;
-  clipboardWrite?: boolean;
+ camera?: boolean;
+ microphone?: boolean;
+ geolocation?: boolean;
+ clipboardWrite?: boolean;
 };
 
 /** The parts of a tool result the app protocol reads. */
 export type AppResultLike = {
-  /** Result-level metadata; a server may name its UI resource here. */
-  _meta?: unknown;
-  /** Content blocks, as the server returned them. */
-  content?: readonly unknown[];
-  /** The server's structured output, when it declared one. */
-  structuredContent?: unknown;
-  /** True when the tool itself reported failure (the call succeeded; the tool did not). */
-  isError?: boolean;
+ /** Result-level metadata; a server may name its UI resource here. */
+ _meta?: unknown;
+ /** Content blocks, as the server returned them. */
+ content?: readonly unknown[];
+ /** The server's structured output, when it declared one. */
+ structuredContent?: unknown;
+ /** True when the tool itself reported failure (the call succeeded; the tool did not). */
+ isError?: boolean;
 };
 
 /** The MCP-shaped tool result a sidecar window receives, bounded to what it can render. */
 export type AppToolResult = {
-  /** Content blocks, in the order the server returned them. */
-  content: unknown[];
-  /** The server's structured output, when it fitted beside the content. */
-  structuredContent?: unknown;
-  isError?: boolean;
+ /** Content blocks, in the order the server returned them. */
+ content: unknown[];
+ /** The server's structured output, when it fitted beside the content. */
+ structuredContent?: unknown;
+ isError?: boolean;
 };
 
 /** Whether a URI names a `ui://` resource. The specification defines nothing past the prefix. */
 export function isUiUri(uri: string): boolean {
-  return uri.startsWith(UI_URI_PREFIX);
+ return uri.startsWith(UI_URI_PREFIX);
 }
 
 /**
@@ -208,33 +216,113 @@ export function isUiUri(uri: string): boolean {
  * 400. None of them may reach an endpoint, whatever put one there.
  */
 export const APP_HOST_OWNED_URI_PARAMS: readonly string[] = [
-  "server_id",
+ "server_id",
 ];
+
+/**
+ * One resource's URI with an endpoint's resource prefix applied, idempotently.
+ *
+ * A portal serves a resource it fronts under `{serverId}_{uri}` — its own name for it, the one its
+ * `resources/list` publishes and the only one its `resources/read` answers — while the URI a tool or
+ * a result carries in `_meta.ui.resourceUri` is the upstream server's plain `ui://` name. Applying
+ * the prefix once turns the declared name into the name the endpoint serves; a URI that already
+ * carries it is returned unchanged, so the same URI can never be prefixed twice.
+ */
+export function prefixedAppUri(prefix: string | undefined, uri: string): string {
+ if (prefix === undefined || prefix === "" || uri.startsWith(prefix)) return uri;
+ return `${prefix}${uri}`;
+}
+
+// The same URI without the endpoint's resource prefix, when it carries one.
+function withoutAppPrefix(prefix: string | undefined, uri: string): string {
+ return prefix !== undefined && prefix !== "" && uri.startsWith(prefix)
+  ? uri.slice(prefix.length)
+  : uri;
+}
+
+/** Whether `uri` names an app resource, under its own `ui://` name or an endpoint's prefixed one. */
+export function isAppResourceUri(prefix: string | undefined, uri: string): boolean {
+ return isUiUri(withoutAppPrefix(prefix, uri));
+}
 
 /**
  * The URI to read one app resource by, on the binding that minted its link.
  *
- * A link names a resource the way its server declared it, and that is the name its window asks for;
- * this is only what the binding has to send to reach the same resource, which differs for an
- * endpoint that renames (see `AppBinding.resourceUriPrefix`).
+ * A link names a resource the way its server declared it (`canonicalAppUri`), and that is the name
+ * its window asks for; this is only what the binding has to send to reach the same resource, which
+ * differs for an endpoint that renames (see `AppBinding.resourceUriPrefix`).
  */
 export function appResourceUri(binding: AppBinding, uri: string): string {
-  // The strip is applied whatever the endpoint: what a window asks to read is a URI the app wrote,
-  // and a host-owned routing value must not travel to any endpoint even when the binding serves
-  // resources under the names they were declared with. Other query parameters survive in order.
-  return `${binding.resourceUriPrefix ?? ""}${withoutHostOwnedUriParams(uri)}`;
+ // The strip is applied whatever the endpoint: a host-owned routing value must not travel to any
+ // endpoint even when the binding serves resources under the names they were declared with.
+ return prefixedAppUri(binding.resourceUriPrefix, canonicalAppUri(uri));
 }
 
-// Drops every query parameter whose name this deployment owns, a bare `name` with no `=` included.
-function withoutHostOwnedUriParams(uri: string): string {
-  const start = uri.indexOf("?");
-  if (start < 0) return uri;
-  const kept = uri.slice(start + 1).split("&").filter(part => {
-    const equals = part.indexOf("=");
-    const name = equals < 0 ? part : part.slice(0, equals);
-    return !APP_HOST_OWNED_URI_PARAMS.includes(name);
-  });
-  return kept.length === 0 ? uri.slice(0, start) : `${uri.slice(0, start)}?${kept.join("&")}`;
+/**
+ * The name one app resource is read by, on this binding.
+ *
+ * The resource's own `ui://` name for an endpoint that serves it under the name it declared; the
+ * binding's prefixed name (`{prefix}{uri}`, see `AppBinding.resourceUriPrefix`) for an endpoint that
+ * renames what it fronts. A portal answers `{serverId}_{uri}` and refuses the URI the upstream
+ * declared with `-32602 Resource not found`, so when a prefix is declared that is the only name
+ * tried: the unprefixed one is not a second chance, it is a request the endpoint has already said it
+ * will not serve. The prefix is applied idempotently, so a name that already carries it is used as
+ * it is and never prefixed twice. It is a single name because a read sends one URI, and every name
+ * here would be the same resource.
+ */
+export function appResourceNames(binding: AppBinding, uri: string): string[] {
+ const canonical = canonicalAppUri(uri);
+ const prefix = binding.resourceUriPrefix;
+ return [prefix ? prefixedAppUri(prefix, canonical) : canonical];
+}
+
+/**
+ * The name one tool call reaches this binding's endpoint under, when a window asks by the name its
+ * own document knows.
+ *
+ * A portal namespaces the tools it fronts exactly as it namespaces their resources: it serves an
+ * upstream `ns_getSuiteQLMetadata` as `netsuite-sb1_ns_getSuiteQLMetadata`, so an app that calls the
+ * upstream's own name (which is all its document can know) would otherwise be refused as one this
+ * binding does not grant. The binding's namespacing prefix is the one `AppBinding.resourceUriPrefix`
+ * already holds, applied idempotently, so a name that already carries it is used as it is. The app
+ * side asks by the name it knows; which name reaches the endpoint is the binding's business, exactly
+ * as it is for a resource read.
+ */
+export function appToolNames(binding: AppBinding, name: string): string[] {
+ const prefix = binding.resourceUriPrefix;
+ if (prefix === undefined || prefix === "") return [name];
+ return [name.startsWith(prefix) ? name : `${prefix}${name}`];
+}
+
+/**
+ * The app resource's own name: the URI its server declared, with every query parameter this
+ * deployment owns (see `APP_HOST_OWNED_URI_PARAMS`) dropped, a bare `name` with no `=` included.
+ *
+ * It always starts with `ui://`, and it is what a link stores, what its window asks for, and the
+ * name a read reaches the endpoint under unless that endpoint renames what it fronts. `server_id`
+ * is an endpoint's own routing value rather than part of a resource's identity -- a read carrying it
+ * is refused by at least one portal -- so it never travels, whatever put it there. Other query
+ * parameters survive in order.
+ */
+export function canonicalAppUri(uri: string): string {
+ const start = uri.indexOf("?");
+ if (start < 0) return uri;
+ const kept = uri.slice(start + 1).split("&").filter(part => {
+  const equals = part.indexOf("=");
+  const name = equals < 0 ? part : part.slice(0, equals);
+  // A read observed in production carried the parameter percent-encoded (`server%5Fid`), so the
+  // comparison is made on the decoded spelling too; a name that will not decode is compared as
+  // written.
+  let decoded = name;
+  try {
+   decoded = decodeURIComponent(name);
+  } catch {
+   // A malformed escape names nothing this deployment owns; the raw spelling decides.
+  }
+  return !APP_HOST_OWNED_URI_PARAMS.includes(name)
+   && !APP_HOST_OWNED_URI_PARAMS.includes(decoded);
+ });
+ return kept.length === 0 ? uri.slice(0, start) : `${uri.slice(0, start)}?${kept.join("&")}`;
 }
 
 /**
@@ -244,14 +332,14 @@ function withoutHostOwnedUriParams(uri: string): string {
  * either carrying a `charset` parameter all read as the same document.
  */
 export function isAppMimeType(mimeType: string | undefined): boolean {
-  return mimeType !== undefined && mediaType(mimeType) === APP_MEDIA_TYPE;
+ return mimeType !== undefined && mediaType(mimeType) === APP_MEDIA_TYPE;
 }
 
 // The media type out of a declared content type, without its parameters. Split by hand rather than
 // by index access so it needs no non-null assertion.
 function mediaType(declared: string): string {
-  const separator = declared.indexOf(";");
-  return (separator === -1 ? declared : declared.slice(0, separator)).trim().toLowerCase();
+ const separator = declared.indexOf(";");
+ return (separator === -1 ? declared : declared.slice(0, separator)).trim().toLowerCase();
 }
 
 // A value that names a resource this host will mint a link for. Bounded as well as prefixed: the URI
@@ -259,9 +347,9 @@ function mediaType(declared: string): string {
 // chooses its length. A URI past the bound is ignored rather than truncated, since the prefix that
 // survived would name a different resource than the server meant.
 function usableUri(value: unknown): string | undefined {
-  return typeof value === "string" && isUiUri(value) && value.length <= MAX_UI_URI_CHARS
-    ? value
-    : undefined;
+ return typeof value === "string" && isUiUri(value) && value.length <= MAX_UI_URI_CHARS
+  ? canonicalAppUri(value)
+  : undefined;
 }
 
 /**
@@ -272,8 +360,8 @@ function usableUri(value: unknown): string | undefined {
  * tool with a broken association is still a working tool.
  */
 export function toolUiResourceUri(tool: McpTool): string | undefined {
-  const uri = tool.ui?.resourceUri;
-  return uri !== undefined && isUiUri(uri) ? uri : undefined;
+ const uri = tool.ui?.resourceUri;
+ return uri !== undefined && isUiUri(uri) ? canonicalAppUri(uri) : undefined;
 }
 
 /**
@@ -284,30 +372,30 @@ export function toolUiResourceUri(tool: McpTool): string | undefined {
  * that carries an ordinary resource cannot mint a sidecar link.
  */
 export function uiResourceUriInResult(result: AppResultLike): string | undefined {
-  const declared = usableUri(asRecord(asRecord(result._meta)?.ui)?.resourceUri);
-  if (declared !== undefined) return declared;
+ const declared = usableUri(asRecord(asRecord(result._meta)?.ui)?.resourceUri);
+ if (declared !== undefined) return declared;
 
-  for (const block of result.content ?? []) {
-    const content = asRecord(block);
-    let uri: unknown;
-    if (content?.type === "resource") uri = asRecord(content.resource)?.uri;
-    else if (content?.type === "resource_link") uri = content.uri;
-    const usable = usableUri(uri);
-    if (usable !== undefined) return usable;
-  }
-  return undefined;
+ for (const block of result.content ?? []) {
+  const content = asRecord(block);
+  let uri: unknown;
+  if (content?.type === "resource") uri = asRecord(content.resource)?.uri;
+  else if (content?.type === "resource_link") uri = content.uri;
+  const usable = usableUri(uri);
+  if (usable !== undefined) return usable;
+ }
+ return undefined;
 }
 
 /** Whether a tool may appear in the agent's tool list. Absent visibility means both sides. */
 export function toolVisibleToModel(tool: McpTool): boolean {
-  const visibility = tool.ui?.visibility;
-  return visibility === undefined || visibility.includes("model");
+ const visibility = tool.ui?.visibility;
+ return visibility === undefined || visibility.includes("model");
 }
 
 /** Whether a tool may be called from an app. Absent visibility means both sides. */
 export function toolVisibleToApp(tool: McpTool): boolean {
-  const visibility = tool.ui?.visibility;
-  return visibility === undefined || visibility.includes("app");
+ const visibility = tool.ui?.visibility;
+ return visibility === undefined || visibility.includes("app");
 }
 
 /**
@@ -318,30 +406,30 @@ export function toolVisibleToApp(tool: McpTool): boolean {
  * used, since a string list is not yet a list of source expressions.
  */
 export function clampResourceMeta(value: unknown): McpAppResourceMeta | undefined {
-  const declared = asRecord(value);
-  if (!declared) return undefined;
-  const csp = asRecord(declared.csp);
-  const permissions = asRecord(declared.permissions);
-  return {
-    csp: csp && {
-      connectDomains: clampDomains(csp.connectDomains),
-      resourceDomains: clampDomains(csp.resourceDomains),
-      frameDomains: clampDomains(csp.frameDomains),
-      baseUriDomains: clampDomains(csp.baseUriDomains),
-    },
-    permissions: permissions && {
-      camera: declaredPermission(permissions.camera),
-      microphone: declaredPermission(permissions.microphone),
-      geolocation: declaredPermission(permissions.geolocation),
-      clipboardWrite: declaredPermission(permissions.clipboardWrite),
-    },
-  };
+ const declared = asRecord(value);
+ if (!declared) return undefined;
+ const csp = asRecord(declared.csp);
+ const permissions = asRecord(declared.permissions);
+ return {
+  csp: csp && {
+   connectDomains: clampDomains(csp.connectDomains),
+   resourceDomains: clampDomains(csp.resourceDomains),
+   frameDomains: clampDomains(csp.frameDomains),
+   baseUriDomains: clampDomains(csp.baseUriDomains),
+  },
+  permissions: permissions && {
+   camera: declaredPermission(permissions.camera),
+   microphone: declaredPermission(permissions.microphone),
+   geolocation: declaredPermission(permissions.geolocation),
+   clipboardWrite: declaredPermission(permissions.clipboardWrite),
+  },
+ };
 }
 
 // A permission is declared as a present value -- the specification writes `camera: {}` -- so
 // anything present and not explicitly refused counts as asked for.
 function declaredPermission(value: unknown): boolean {
-  return value !== undefined && value !== null && value !== false;
+ return value !== undefined && value !== null && value !== false;
 }
 
 /**
@@ -354,49 +442,49 @@ function declaredPermission(value: unknown): boolean {
  * directive and write another.
  */
 export function viewCsp(meta: McpAppResourceMeta | undefined): string {
-  const csp = meta?.csp;
-  const resources = cspSources(csp?.resourceDomains);
-  const connections = cspSources(csp?.connectDomains);
-  const frames = cspSources(csp?.frameDomains);
-  const bases = cspSources(csp?.baseUriDomains);
-  return [
-    // Naming every directive the app may use is what makes this an allow-list: anything the document
-    // tries that is not spelled out here falls through to `default-src 'none'`.
-    "default-src 'none'",
-    `script-src 'self' 'unsafe-inline'${resources}`,
-    `style-src 'self' 'unsafe-inline'${resources}`,
-    `img-src 'self' data:${resources}`,
-    `media-src 'self' data:${resources}`,
-    // Only declared origins reach `font-src`, without `'self'`: the specification's default list
-    // names no source for it, so `'none'` is the default and `'self'` would be a widening the server
-    // never asked for.
-    `font-src${resources || " 'none'"}`,
-    connections ? `connect-src${connections}` : "connect-src 'none'",
-    frames ? `frame-src${frames}` : "frame-src 'none'",
-    bases ? `base-uri${bases}` : "base-uri 'self'",
-    // Unconditional, and the one directive nothing may widen: an app document has no business
-    // loading a plugin, whatever it declares.
-    "object-src 'none'",
-  ].join("; ");
+ const csp = meta?.csp;
+ const resources = cspSources(csp?.resourceDomains);
+ const connections = cspSources(csp?.connectDomains);
+ const frames = cspSources(csp?.frameDomains);
+ const bases = cspSources(csp?.baseUriDomains);
+ return [
+  // Naming every directive the app may use is what makes this an allow-list: anything the document
+  // tries that is not spelled out here falls through to `default-src 'none'`.
+  "default-src 'none'",
+  `script-src 'self' 'unsafe-inline'${resources}`,
+  `style-src 'self' 'unsafe-inline'${resources}`,
+  `img-src 'self' data:${resources}`,
+  `media-src 'self' data:${resources}`,
+  // Only declared origins reach `font-src`, without `'self'`: the specification's default list
+  // names no source for it, so `'none'` is the default and `'self'` would be a widening the server
+  // never asked for.
+  `font-src${resources || " 'none'"}`,
+  connections ? `connect-src${connections}` : "connect-src 'none'",
+  frames ? `frame-src${frames}` : "frame-src 'none'",
+  bases ? `base-uri${bases}` : "base-uri 'self'",
+  // Unconditional, and the one directive nothing may widen: an app document has no business
+  // loading a plugin, whatever it declares.
+  "object-src 'none'",
+ ].join("; ");
 }
 
 // The iframe feature each declared permission maps to, in a fixed order so that one declaration
 // always renders one attribute.
 const ALLOW_FEATURES: ReadonlyArray<[keyof McpAppResourcePermissions, string]> = [
-  ["camera", "camera"],
-  ["microphone", "microphone"],
-  ["geolocation", "geolocation"],
-  ["clipboardWrite", "clipboard-write"],
+ ["camera", "camera"],
+ ["microphone", "microphone"],
+ ["geolocation", "geolocation"],
+ ["clipboardWrite", "clipboard-write"],
 ];
 
 /** The app frame's `allow` attribute, when the resource declared any permission at all. */
 export function viewAllowAttribute(meta: McpAppResourceMeta | undefined): string | undefined {
-  const permissions = meta?.permissions;
-  if (!permissions) return undefined;
-  const features = ALLOW_FEATURES
-    .filter(([declared]) => permissions[declared] === true)
-    .map(([, feature]) => feature);
-  return features.length > 0 ? features.join("; ") : undefined;
+ const permissions = meta?.permissions;
+ if (!permissions) return undefined;
+ const features = ALLOW_FEATURES
+  .filter(([declared]) => permissions[declared] === true)
+  .map(([, feature]) => feature);
+ return features.length > 0 ? features.join("; ") : undefined;
 }
 
 /**
@@ -410,59 +498,59 @@ export function viewAllowAttribute(meta: McpAppResourceMeta | undefined): string
  * content and no structured output still renders something and the reverse is an empty frame.
  */
 export function clampAppResult(result: AppResultLike): AppToolResult {
-  const content: unknown[] = [];
-  // The budget bounds the whole result, not just its content: the envelope below costs a fixed
-  // handful of bytes and is reserved up front rather than allowed to overshoot.
-  let remaining = MAX_APP_RESULT_BYTES - RESULT_ENVELOPE_BYTES;
-  for (const block of result.content ?? []) {
-    const size = encodedBytes(block) + 1;
-    if (size > remaining) {
-      const clipped = clipTextBlock(block, remaining);
-      if (clipped !== undefined) content.push(clipped);
-      remaining = 0;
-      break;
-    }
-    remaining -= size;
-    content.push(block);
+ const content: unknown[] = [];
+ // The budget bounds the whole result, not just its content: the envelope below costs a fixed
+ // handful of bytes and is reserved up front rather than allowed to overshoot.
+ let remaining = MAX_APP_RESULT_BYTES - RESULT_ENVELOPE_BYTES;
+ for (const block of result.content ?? []) {
+  const size = encodedBytes(block) + 1;
+  if (size > remaining) {
+   const clipped = clipTextBlock(block, remaining);
+   if (clipped !== undefined) content.push(clipped);
+   remaining = 0;
+   break;
   }
+  remaining -= size;
+  content.push(block);
+ }
 
-  const structuredContent = result.structuredContent !== undefined
-    && encodedBytes(result.structuredContent) + 1 <= remaining
-    ? result.structuredContent
-    : undefined;
-  const bounded: AppToolResult = { content };
-  if (structuredContent !== undefined) bounded.structuredContent = structuredContent;
-  if (typeof result.isError === "boolean") bounded.isError = result.isError;
-  return bounded;
+ const structuredContent = result.structuredContent !== undefined
+  && encodedBytes(result.structuredContent) + 1 <= remaining
+  ? result.structuredContent
+  : undefined;
+ const bounded: AppToolResult = { content };
+ if (structuredContent !== undefined) bounded.structuredContent = structuredContent;
+ if (typeof result.isError === "boolean") bounded.isError = result.isError;
+ return bounded;
 }
 
 // A text block that does not fit is clipped into the room left; any other block is dropped whole,
 // since half an image is not a smaller image. The replacement carries only its text: a clipped block
 // is a summary of the server's, and keeping its annotations would keep fields nothing here reads.
 function clipTextBlock(block: unknown, budget: number): { type: "text"; text: string } | undefined {
-  const record = asRecord(block);
-  if (record?.type !== "text" || typeof record.text !== "string") return undefined;
-  const prefix = clipToBytes(record.text, budget - TEXT_BLOCK_BYTES);
-  return prefix.length > 0 ? { type: "text", text: `${prefix}${ELLIPSIS}` } : undefined;
+ const record = asRecord(block);
+ if (record?.type !== "text" || typeof record.text !== "string") return undefined;
+ const prefix = clipToBytes(record.text, budget - TEXT_BLOCK_BYTES);
+ return prefix.length > 0 ? { type: "text", text: `${prefix}${ELLIPSIS}` } : undefined;
 }
 
 // Longest prefix of `text` that fits in `maxBytes` once encoded. Byte-accurate rather than a
 // character count, because the cap exists to bound what a window is sent and non-ASCII text costs up
 // to four bytes per character.
 function clipToBytes(text: string, maxBytes: number): string {
-  let low = 0;
-  let high = Math.min(text.length, Math.max(0, maxBytes));
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    if (encoder.encode(text.slice(0, middle)).byteLength <= maxBytes) low = middle;
-    else high = middle - 1;
-  }
-  return text.slice(0, low);
+ let low = 0;
+ let high = Math.min(text.length, Math.max(0, maxBytes));
+ while (low < high) {
+  const middle = Math.ceil((low + high) / 2);
+  if (encoder.encode(text.slice(0, middle)).byteLength <= maxBytes) low = middle;
+  else high = middle - 1;
+ }
+ return text.slice(0, low);
 }
 
 // Serialized size of one value as it would cross the JSON-RPC endpoint.
 function encodedBytes(value: unknown): number {
-  return encoder.encode(JSON.stringify(value) ?? "").byteLength;
+ return encoder.encode(JSON.stringify(value) ?? "").byteLength;
 }
 
 // One CSP source expression: a scheme, an optional wildcard subdomain, a host, and an optional port.
@@ -476,27 +564,27 @@ const CSP_ORIGIN = /^(?:https?|wss?):\/\/(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*(?:
 // the first `MAX_APP_CSP_DOMAINS` entries are read at all: the list behind them may be as long as
 // the response cap allows, and nothing past the bound could reach a policy anyway.
 function cspSources(domains: string[] | undefined): string {
-  const sources: string[] = [];
-  for (const domain of (domains ?? []).slice(0, MAX_APP_CSP_DOMAINS)) {
-    if (typeof domain === "string" && domain.length <= MAX_APP_CSP_DOMAIN_CHARS
-      && CSP_ORIGIN.test(domain)) {
-      sources.push(` ${domain}`);
-    }
+ const sources: string[] = [];
+ for (const domain of (domains ?? []).slice(0, MAX_APP_CSP_DOMAINS)) {
+  if (typeof domain === "string" && domain.length <= MAX_APP_CSP_DOMAIN_CHARS
+   && CSP_ORIGIN.test(domain)) {
+   sources.push(` ${domain}`);
   }
-  return sources.join("");
+ }
+ return sources.join("");
 }
 
 // A declared list of strings, or nothing: a metadata field that is a string, a number, or an object
 // is not a list of domains, and reads as "not declared".
 function clampDomains(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const domains = value.filter((domain): domain is string => typeof domain === "string");
-  return domains.length > 0 ? domains : undefined;
+ if (!Array.isArray(value)) return undefined;
+ const domains = value.filter((domain): domain is string => typeof domain === "string");
+ return domains.length > 0 ? domains : undefined;
 }
 
 // Untrusted JSON reaches this module as `unknown`, so one narrowing is shared rather than repeated.
 function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
+ return typeof value === "object" && value !== null && !Array.isArray(value)
+  ? value as Record<string, unknown>
+  : undefined;
 }

@@ -9,6 +9,7 @@ import {
   portalTokenFor,
   portalTrust,
   readPortalConfig,
+  requirePortalCodeModeScope,
   requirePortalServerVisible,
   requirePortalServerScope,
   toolGrantOptions,
@@ -184,6 +185,32 @@ describe("requirePortalServerScope", () => {
     expect(() => requirePortalServerScope({
       serverId: "portal", tools: ["portal_toggle_servers"],
     })).toThrow(/portal management tool/i);
+  });
+});
+
+describe("requirePortalCodeModeScope", () => {
+  it("accepts a Code Mode grant that names nothing else", () => {
+    expect(() => requirePortalCodeModeScope({ codeMode: "search_and_execute" })).not.toThrow();
+  });
+
+  it("refuses a scope that selects no supported Code Mode", () => {
+    expect(() => requirePortalCodeModeScope({})).toThrow(/Code Mode/);
+    expect(() => requirePortalCodeModeScope({ codeMode: "bogus" as never })).toThrow(/Code Mode/);
+  });
+
+  it("refuses a Code Mode grant that also names a server or tools", () => {
+    // The sandbox belongs to the portal, so a `#server=`/`#tool=` pin could not be enforced; the
+    // shape must never reach a facet looking like it was.
+    expect(() => requirePortalCodeModeScope(
+      { codeMode: "search_and_execute", serverId: "github" })).toThrow(/cannot also name/);
+    expect(() => requirePortalCodeModeScope(
+      { codeMode: "search_and_execute", tools: ["github_a"] })).toThrow(/cannot also name/);
+  });
+
+  it("keeps the server-grant validator closed against a Code Mode scope", () => {
+    expect(() => requirePortalServerScope({ codeMode: "search_and_execute" })).toThrow(/Code Mode/);
+    expect(() => requirePortalServerScope(
+      { codeMode: "search_and_execute", serverId: "github" })).toThrow(/Code Mode/);
   });
 });
 

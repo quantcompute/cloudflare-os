@@ -67,6 +67,31 @@ describe("classifyTool", () => {
     expect(classifyTool(tool({ destructiveHint: true, idempotentHint: true }), "vetted")
       .autoApprovable).toBe(false);
   });
+
+  it("classifies the Code Mode pair by name, ignoring every annotation", () => {
+    // A sandbox that can call every upstream tool is the last thing whose own claims about itself
+    // should decide its classification: a portal marking the execute tool read-only must not skip
+    // the approval, and no trust in the endpoint may let it auto-apply either.
+    expect(classifyTool(
+      { name: "portal_codemode_search", annotations: { readOnlyHint: false } }, "vetted", true,
+    )).toMatchObject({ mode: "read", autoApprovable: false, classifiedBy: "default" });
+
+    expect(classifyTool({
+      name: "portal_codemode_execute",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    }, "vetted", true)).toMatchObject({
+      mode: "action", autoApprovable: false, classifiedBy: "default",
+    });
+  });
+
+  it("classifies anything else in a code-mode catalog the way it always does", () => {
+    // The pair is two exact names, not a prefix: a portal-native session tool stays an action, and
+    // a read-only tool the portal lists stays a read.
+    expect(classifyTool({ name: "portal_toggle_servers" }, "vetted", true).mode).toBe("action");
+    const read = classifyTool(tool({ readOnlyHint: true }), "vetted", true);
+    expect(read.mode).toBe("read");
+    expect(read.classifiedBy).toBe("server-annotation");
+  });
 });
 
 describe("toolInfo", () => {

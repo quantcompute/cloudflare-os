@@ -6,6 +6,7 @@ type Hop = {
   url: string;
   authorization: string | null;
   sessionId: string | null;
+  userAgent: string | null;
   method: string;
   body: unknown;
 };
@@ -18,6 +19,7 @@ function stubChain(chain: Record<string, string>, status = 307): Hop[] {
       url: String(input),
       authorization: new Headers(init.headers).get("Authorization"),
       sessionId: new Headers(init.headers).get("Mcp-Session-Id"),
+      userAgent: new Headers(init.headers).get("User-Agent"),
       method: init.method ?? "GET",
       body: init.body,
     });
@@ -43,6 +45,16 @@ describe("guardedFetch", () => {
 
     await guardedFetch("https://mcp.example.com/mcp", {});
     expect(signal).toBeUndefined();
+  });
+
+  it("identifies itself, and leaves a caller's User-Agent alone", async () => {
+    let hops = stubChain({});
+    await guardedFetch("https://mcp.example.com/mcp", {});
+    expect(hops[0].userAgent).toBe("Cloudflare-Gadgets");
+
+    hops = stubChain({});
+    await guardedFetch("https://mcp.example.com/mcp", { headers: { "User-Agent": "Other/1.0" } });
+    expect(hops[0].userAgent).toBe("Other/1.0");
   });
 
   it("refuses a blocked host outright", async () => {

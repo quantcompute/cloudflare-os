@@ -26,7 +26,7 @@ import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
-import { vpRunEnv } from "./vp/concurrency.ts";
+import { vpCacheFlag, vpRunEnv } from "./vp/concurrency.ts";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SCRIPTS_DIR, "..");
@@ -323,9 +323,9 @@ function runBuild(
 const VP_PREFLIGHT_BUILDS = [
   {
     label: "configurator UIs",
-    args: ["exec", "vp", "run", "-r", "--cache", "build:configurator", "--dev"],
+    args: ["exec", "vp", "run", "-r", vpCacheFlag(), "build:configurator", "--dev"],
   },
-  { label: "gatekeeper app UIs", args: ["exec", "vp", "run", "-r", "--cache", "build:app:dev"] },
+  { label: "gatekeeper app UIs", args: ["exec", "vp", "run", "-r", vpCacheFlag(), "build:app:dev"] },
 ];
 const vpEnv = vpRunEnv({ concurrentRuns: VP_PREFLIGHT_BUILDS.length });
 try {

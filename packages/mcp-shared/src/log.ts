@@ -14,6 +14,12 @@ export type McpLogFields = {
  /** Endpoint host only. The path may encode tenant identifiers, so it is never logged. */
  serverHost: string;
  toolName: string;
+ /**
+  * The name a tool call reached the endpoint under, when it differs from `toolName`: a binding that
+  * fronts a renaming endpoint (a portal serves `{serverId}_{tool}`) resolves the window's own name
+  * to the endpoint's, and this is the endpoint's. Absent when the two coincide.
+  */
+ appToolName: string;
  actionId: number;
  toolCount: number;
  catalogRevision: string;
@@ -44,6 +50,64 @@ export type McpLogFields = {
   * operator can check after the fact without the name it went out under.
   */
  resourceUri: string;
+ /**
+  * Which name a resource read went out under, when a binding has more than one for it: the resource's
+  * own `ui://` name (`appUri`, tried first) or the binding's renamed name (`resourceUri`, the
+  * fallback). A link that opens on one portal and refuses on another is only explicable with this.
+  */
+ appResourceName: string;
+ /**
+  * How many resource items a read returned. A count of zero is a successful read the server answered
+  * with nothing, which is what tells "the resource is not there" apart from "the read failed".
+  */
+ appContentCount: number;
+ /**
+  * The URIs the items of a `resources/read` answer carried, joined. The server's own name for what it
+  * returned, which differs from the name asked for when an endpoint fronts resources under a prefix.
+  */
+ appContentUris: string;
+ /**
+  * A bounded description of the items a `resources/read` answered with when none of them was a
+  * document this host renders: each item's URI, media type and body size, joined. It is the result of
+  * the call as the host read it -- the body itself is never logged -- so a read that returned
+  * something unusable is told apart from one that returned nothing.
+  */
+ appContentItems: string;
+ /**
+  * The byte length of the reply a `resources/read` call returned, whether or not it carried a
+  * document. A read that answered with nothing this host can render is otherwise indistinguishable
+  * from a transport hiccup, and this number tells a tiny empty answer from a large unusable one.
+  */
+ appResponseBytes: number;
+ /**
+  * TEMPORARY (remove): each item of a `resources/read` answer that was not an app document, dumped
+  * as its declared media type and a prefix of its body. `appContentItems` names a type and a size but
+  * never the body, so it cannot show why a read the endpoint served as a document did not read as
+  * one. Exists only to diagnose that mismatch and goes with the log line that emits it.
+  */
+ appContentSample: string;
+ /**
+  * TEMPORARY (remove): the media type of a `resources/read` reply and a bounded head of its raw
+  * body, logged beside a read that produced no usable document. `appResponseBytes` says how large
+  * the reply was but never what arrived, so an answer whose document was dropped by a size check,
+  * or framed in a way this client did not expect, cannot be told apart from one that carried
+  * nothing. Goes with the log line that emits it.
+  */
+ wireContentType: string;
+ wireHead: string;
+ /**
+  * TEMPORARY (remove): every item of the raw `resources/read` result before this client filtered
+  * it -- URI, declared media type, decoded body size and, for a discarded item, why. The
+  * post-filter fields are empty exactly when this is the only evidence there is.
+  */
+ appWireItems: string;
+ /**
+  * How many resources a diagnostic `resources/list` returned after a read was refused, and their URIs
+  * joined. The pair says which names an endpoint actually publishes when the one a link asked for was
+  * not found.
+  */
+ appResourceCount: number;
+ appResourceNames: string;
 };
 
 /** The logger this package expects to be handed. */

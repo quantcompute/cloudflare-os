@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  isPortalCodeMode,
+  isPortalCodeModeTool,
   isPortalNativeTool,
   looksLikePortal,
   parsePortalServers,
+  PORTAL_CODEMODE_EXECUTE_TOOL,
+  PORTAL_CODEMODE_MODES,
+  PORTAL_CODEMODE_SEARCH_TOOL,
   portalResourcePrefix,
   reconcilePortalServers,
   toolBelongsToServer,
+  withCodeMode,
 } from "../src/portal.js";
 import { scopeAllows } from "../src/scope.js";
 import { MAX_TOOLS_PER_SERVER } from "../src/tools.js";
@@ -239,5 +245,42 @@ describe("reconcilePortalServers", () => {
       [{ id: "gh", name: "Zulip", enabled: true }, { id: "linear", name: "Asana", enabled: true }],
       tools,
     ).map(server => server.name)).toEqual(["Asana", "Zulip"]);
+  });
+});
+
+describe("Code Mode", () => {
+  it("recognizes only the modes this deployment requests", () => {
+    expect(PORTAL_CODEMODE_MODES).toEqual(["search_and_execute"]);
+    expect(isPortalCodeMode("search_and_execute")).toBe(true);
+    // A value this deployment does not know is refused rather than forwarded: the mode decides what
+    // the portal lists and what a grant reaches, so an unknown one is not something to guess at.
+    for (const value of ["off", "execute_and_search", "", null, undefined, 1]) {
+      expect(isPortalCodeMode(value), String(value)).toBe(false);
+    }
+  });
+
+  it("recognizes exactly the two tools the portal exposes in that mode", () => {
+    expect(isPortalCodeModeTool(PORTAL_CODEMODE_SEARCH_TOOL)).toBe(true);
+    expect(isPortalCodeModeTool(PORTAL_CODEMODE_EXECUTE_TOOL)).toBe(true);
+    for (const name of [
+      "portal_list_servers", "portal_toggle_servers", "portal_codemode", "portal_codemode_execute2",
+      "gh_list_issues",
+    ]) {
+      expect(isPortalCodeModeTool(name), name).toBe(false);
+    }
+  });
+
+  it("applies the mode as a query parameter with the endpoint's own parameters preserved", () => {
+    expect(withCodeMode("https://portal.example.com/mcp", "search_and_execute"))
+      .toBe("https://portal.example.com/mcp?codemode=search_and_execute");
+    expect(withCodeMode("https://portal.example.com/mcp?tenant=a%20b&x=1", "search_and_execute"))
+      .toBe("https://portal.example.com/mcp?tenant=a+b&x=1&codemode=search_and_execute");
+  });
+
+  it("replaces a mode the endpoint itself spells", () => {
+    // A portal whose policy is default-on is connected to with `codemode=off`, so the endpoint's own
+    // parameter is exactly what the grant has to overrule rather than append beside.
+    expect(withCodeMode("https://portal.example.com/mcp?codemode=off", "search_and_execute"))
+      .toBe("https://portal.example.com/mcp?codemode=search_and_execute");
   });
 });

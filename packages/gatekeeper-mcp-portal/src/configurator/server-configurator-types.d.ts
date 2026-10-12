@@ -6,7 +6,7 @@ import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 /** Values collected by the configurator and turned into a resource URL. */
 export type McpServerConfiguratorValues = {
   /**
-   * The chosen upstream server id. Null until one is picked.
+   * The chosen upstream server id. Null until one is picked; unused by a Code Mode grant.
    */
   server?: string | null;
   /**
@@ -25,11 +25,20 @@ export type McpServerConfiguratorValues = {
    */
   tools?: string | null;
   /**
+   * The portal Code Mode this grant selects, instead of a server grant. `"search_and_execute"` is
+   * the only value `PORTAL_CODEMODE_MODES` defines; when set, the resource URL carries
+   * `#codemode=<mode>` and nothing else, and the server and tool questions are neither asked nor
+   * emitted.
+   */
+  codeMode?: string | null;
+  /**
    * Whether the upstream server list has been retrieved yet, discovered after first paint.
    *
-   * There is deliberately no "this is a plain endpoint" state. Every grant this connector makes
-   * names one upstream server, so an empty listing is ungrantable rather than a bare endpoint whose
-   * grant would silently include servers added later.
+   * There is deliberately no "this is a plain endpoint" state. Every server grant this connector
+   * makes names one upstream server, so an empty listing is ungrantable rather than a bare endpoint
+   * whose grant would silently include servers added later. Code Mode is not that bare endpoint
+   * either: it is the portal's own two-tool breadth, offered only once the listing has shown the
+   * endpoint is a portal.
    *
    * `"empty"` is a successful response with no direct upstream tools; `"unavailable"` is a failed
    * request. Both block the grant, but they require different remediation.
@@ -46,9 +55,9 @@ export interface McpServerConfiguratorRpc {
    * The upstream servers behind the portal.
    *
    * Empty covers both "this endpoint is not a portal" and "it is a portal fronting nothing right
-   * now". The form deliberately does not distinguish them: every grant here names one upstream
-   * server, so neither case has anything it can safely grant, and both leave the form
-   * unsubmittable. A plain MCP endpoint belongs to `gatekeeper-mcp`.
+   * now". The form deliberately does not distinguish them: a server grant has no server it can name
+   * and no proof the endpoint is a portal, so neither case leaves the form submittable. A plain MCP
+   * endpoint belongs to `gatekeeper-mcp`.
    *
    * Rejecting is different again, and must not be read as either: see `endpointKind`.
    */
